@@ -240,7 +240,7 @@ describe("prepared reply dispatch runtime", () => {
     expect(configuredSelectedBefore).not.toBe(configuredRuntimeBefore?.inboundPluginRegistry);
   });
 
-  it("removes only the affected configured projection during an auth refresh", async () => {
+  it("waits only the affected configured projection during an auth refresh", async () => {
     mocks.configuredAgentIds = ["default", "worker"];
     const config = { agents: { defaults: { model: "openai/gpt-5.5" } } };
     await refreshPreparedModelRuntimeSnapshots(config, {
@@ -264,9 +264,7 @@ describe("prepared reply dispatch runtime", () => {
     const defaultRead = loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" });
     const workerRead = loadPublishedGatewayReplyDispatchRuntime({ agentId: "worker" });
     await expect(defaultRead).resolves.toBe(defaultRuntime);
-    await expect(workerRead).rejects.toThrow(
-      "prepared reply dispatch runtime owner was not published for worker",
-    );
+    await expect(workerRead).resolves.not.toBe(workerRuntime);
 
     await published.promise;
     unregister();
@@ -278,5 +276,38 @@ describe("prepared reply dispatch runtime", () => {
       workspaceDir: "/tmp/workspace-worker",
     });
     expect(refreshedWorker).not.toBe(workerRuntime);
+  });
+
+  it("keeps run admission pending while auth publication replaces its projection", async () => {
+    mocks.configuredAgentIds = ["default"];
+    const config = {};
+    const input = {
+      agentId: "default",
+      agentDir: "/tmp/unused-agent",
+      config,
+      workspaceDir: "/tmp/unused-workspace",
+    };
+    await refreshPreparedModelRuntimeSnapshots(config, { gatewayLifecycle: true });
+    let finishAuthRefresh: (() => void) | undefined;
+    mocks.ensureOpenClawModelsJson.mockImplementationOnce(
+      async () =>
+        await new Promise<{ agentDir: string; wrote: false }>((resolve) => {
+          finishAuthRefresh = () => resolve({ agentDir: input.agentDir, wrote: false });
+        }),
+    );
+
+    mocks.mutationListener?.({ agentDir: input.agentDir, affectsInheritedStores: false });
+    await vi.waitFor(() => expect(finishAuthRefresh).toBeDefined());
+    const admission = acquireAgentRunPreparedModelRuntime(input);
+    const observed = admission.then(
+      () => "resolved",
+      () => "rejected",
+    );
+    await expect(Promise.race([observed, Promise.resolve("pending")])).resolves.toBe("pending");
+
+    finishAuthRefresh?.();
+    const lease = await admission;
+    expect(lease.snapshot).toMatchObject({ agentId: "default", agentDir: input.agentDir });
+    lease.release();
   });
 });
