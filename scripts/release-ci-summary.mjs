@@ -14,6 +14,7 @@ import {
   classifyReleaseGhTransportError,
   composeReleaseChildAttemptEvidence,
   formatReleaseStateOutcome,
+  HISTORICAL_CONTINUATION_SOURCE_MODE,
   releaseCompositeJobsSha256,
   terminalPolicyPass,
   validateReleaseChildDispatchBinding,
@@ -1601,6 +1602,21 @@ function normalizedParentTuple(evidence, identity) {
   };
 }
 
+function continuationSourceProducerEvidence(source, sourceRun, sourceManifest) {
+  return {
+    manifest: sourceManifest ?? {
+      targetRef: source.candidate.packageSourceSha,
+      targetSha: source.candidate.packageSourceSha,
+      version: 3,
+      workflowFullRef: `refs/heads/${source.sourceWorkflowRef}`,
+      workflowRef: source.sourceWorkflowRef,
+      workflowRefType: "branch",
+      workflowSha: source.sourceWorkflowSha,
+    },
+    parentRun: sourceRun,
+  };
+}
+
 export function resolveVerifierIdentity(
   sourceSha,
   verifierSourceContent,
@@ -1997,21 +2013,30 @@ export function validateReleaseRunEvidence(
       source.sourceRunId,
       source.sourceRunAttempt,
     );
-    if (!sourceManifestEvidence) {
+    if (
+      !sourceManifestEvidence &&
+      (source.sourceEvidenceMode !== HISTORICAL_CONTINUATION_SOURCE_MODE ||
+        typeof evidenceClient.loadExecutionPlan !== "function" ||
+        evidenceClient.loadExecutionPlan(source.sourceRunId))
+    ) {
       throw new Error("continuation source manifest is missing");
     }
-    const sourceManifest = validateParentManifest(sourceManifestEvidence.manifest, {
-      runAttempt: source.sourceRunAttempt,
-      runId: source.sourceRunId,
-      workflowRef: source.sourceWorkflowRef,
-      workflowSha: source.sourceWorkflowSha,
-    });
-    validateManifestArtifactBinding(
-      sourceManifestEvidence.artifact,
-      sourceManifest,
-      sourceRun,
-      source.sourceRunId,
-    );
+    const sourceManifest = sourceManifestEvidence
+      ? validateParentManifest(sourceManifestEvidence.manifest, {
+          runAttempt: source.sourceRunAttempt,
+          runId: source.sourceRunId,
+          workflowRef: source.sourceWorkflowRef,
+          workflowSha: source.sourceWorkflowSha,
+        })
+      : undefined;
+    if (sourceManifestEvidence) {
+      validateManifestArtifactBinding(
+        sourceManifestEvidence.artifact,
+        sourceManifest,
+        sourceRun,
+        source.sourceRunId,
+      );
+    }
     parentJobs = evidenceClient.getParentJobs(source.sourceRunId);
     const sourceChildLogs = Object.fromEntries(
       expectedChildren.map((child) => {
@@ -2030,11 +2055,23 @@ export function validateReleaseRunEvidence(
       sourceRun,
       targetSha: executionPlan.targetSha,
     });
+    const sourceProducerEvidence = continuationSourceProducerEvidence(
+      source,
+      sourceRun,
+      sourceManifest,
+    );
+    validateTrustedProducerIdentity(
+      sourceProducerEvidence,
+      evidenceClient,
+      verifier,
+      "main",
+      "refs/heads/main",
+    );
     continuationCandidate = source.candidate;
     dispatchEvidence = {
-      artifact: sourceManifestEvidence.artifact,
-      manifest: sourceManifest,
-      manifestJson: canonicalJson(sourceManifestEvidence.manifest),
+      artifact: sourceManifestEvidence?.artifact,
+      manifest: sourceProducerEvidence.manifest,
+      manifestJson: sourceManifestEvidence ? canonicalJson(sourceManifestEvidence.manifest) : null,
       parentRun: sourceRun,
       parentView: sourceRun,
     };
