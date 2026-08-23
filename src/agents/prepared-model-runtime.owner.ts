@@ -453,6 +453,9 @@ export async function publishPreparedModelRuntimeOwnerBatch(params: {
     owner.pendingPluginGeneration = params.reusePluginGenerations
       ? owner.pluginGeneration
       : undefined;
+    // Auth invalidation wraps this batch in a transaction-wide promise. The batch promise keeps
+    // its own supersession guard, then restores the outer promise until dispatch publication.
+    const previousPending = owner.pending;
     const generation = owner.generation;
     const key = ownerKey(input);
     let registered = params.owners.get(key) === owner;
@@ -471,12 +474,17 @@ export async function publishPreparedModelRuntimeOwnerBatch(params: {
         params.owners.get(key) === owner,
       key,
       generation,
+      previousPending,
       markRegistered: () => {
         registered = true;
       },
       owner,
     };
   });
+  const candidatePublications = new Map<
+    PreparedModelRuntimeOwner,
+    Promise<PreparedModelRuntimeSnapshot>
+  >();
   const groups = new Map<PreparedModelRuntimeOwner["catalogMode"], typeof candidates>();
   for (const candidate of candidates) {
     const group = groups.get(candidate.catalogMode);
@@ -584,7 +592,9 @@ export async function publishPreparedModelRuntimeOwnerBatch(params: {
         candidate.owner.snapshot = snapshot;
         results.set(candidate.owner, { ...result, snapshot });
         candidate.owner.pluginGeneration = result.pluginGeneration;
-        candidate.owner.pending = undefined;
+        if (candidate.owner.pending === candidatePublications.get(candidate.owner)) {
+          candidate.owner.pending = candidate.previousPending;
+        }
         candidate.owner.needsRefresh = false;
       }
     } catch (error) {
@@ -596,7 +606,9 @@ export async function publishPreparedModelRuntimeOwnerBatch(params: {
         if (!candidate.isCurrent()) {
           continue;
         }
-        candidate.owner.pending = undefined;
+        if (candidate.owner.pending === candidatePublications.get(candidate.owner)) {
+          candidate.owner.pending = candidate.previousPending;
+        }
         candidate.owner.needsRefresh = true;
         candidate.owner.refreshError = refreshError;
       }
@@ -614,6 +626,7 @@ export async function publishPreparedModelRuntimeOwnerBatch(params: {
       }
       return results.get(candidate.owner)!.snapshot;
     });
+    candidatePublications.set(candidate.owner, pending);
     candidate.owner.pending = pending;
     void pending.catch(() => undefined);
   }

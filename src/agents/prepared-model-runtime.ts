@@ -621,6 +621,10 @@ function invalidateForAuthMutation(event: AuthMutationEvent): void {
   }
   replyDispatchPublication.remove(invalidatedConfiguredAgentIds);
   pendingAuthMutations.push(normalizedEvent);
+  const ownerPublications = new Map<
+    PreparedModelRuntimeOwner,
+    Promise<PreparedModelRuntimeSnapshot>
+  >();
   const publication = enqueuePreparedModelRuntimePublication(async () => {
     // A pending replacement gate means a queued config publication owns the next generation:
     // it drains queued auth mutations against the new config and rebuilds/announces the
@@ -633,11 +637,19 @@ function invalidateForAuthMutation(event: AuthMutationEvent): void {
     if (pendingModelRuntimeReplacement) {
       return;
     }
+    for (const owner of invalidatedOwners) {
+      if (owner.pending === ownerPublications.get(owner)) {
+        owner.pending = undefined;
+      }
+    }
+    // No await may separate clearing the transaction gate from rebuilding its dispatch projection.
+    // Otherwise an admitted request can observe neither the pending owner nor the new publication.
     replyDispatchPublication.rebuild(owners.values());
     notifyPreparedModelRuntimePublication({ phase: "published" });
   });
   for (const owner of invalidatedOwners) {
     const pending = publication.then(() => owner.snapshot!);
+    ownerPublications.set(owner, pending);
     owner.pending = pending;
     const clearPending = () => {
       if (owner.pending === pending) {
