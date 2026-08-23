@@ -597,6 +597,7 @@ function invalidateForAuthMutation(event: AuthMutationEvent): void {
   };
   const staleError = new Error("prepared model runtime owner is stale after auth mutation");
   const invalidatedOwners: PreparedModelRuntimeOwner[] = [];
+  const invalidatedConfiguredAgentIds = new Set<string>();
   for (const owner of owners.values()) {
     if (
       !normalizedEvent.affectsInheritedStores &&
@@ -609,12 +610,16 @@ function invalidateForAuthMutation(event: AuthMutationEvent): void {
     owner.generation += 1;
     owner.needsRefresh = true;
     owner.refreshError = staleError;
+    if (owner.provenance === "configured" && owner.input.agentId) {
+      invalidatedConfiguredAgentIds.add(owner.input.agentId);
+    }
   }
   if (invalidatedOwners.length === 0) {
     // A first owner reads the already-published auth snapshot while it builds. Replaying an earlier
     // mutation would immediately stale that initial generation even though no prior owner existed.
     return;
   }
+  replyDispatchPublication.remove(invalidatedConfiguredAgentIds);
   pendingAuthMutations.push(normalizedEvent);
   const publication = enqueuePreparedModelRuntimePublication(async () => {
     // A pending replacement gate means a queued config publication owns the next generation:

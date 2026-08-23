@@ -59,6 +59,20 @@ function buildReplyDispatchPublication(
   return Object.freeze({ runtimes: Object.freeze(runtimes) });
 }
 
+function removeReplyDispatchRuntimeProjections(
+  publication: PreparedReplyDispatchPublication,
+  agentIds: ReadonlySet<string>,
+): PreparedReplyDispatchPublication {
+  if (agentIds.size === 0) {
+    return publication;
+  }
+  return Object.freeze({
+    runtimes: Object.freeze(
+      publication.runtimes.filter((runtime) => !agentIds.has(runtime.agentId)),
+    ),
+  });
+}
+
 type PreparedReplyDispatchPublicationHost = Readonly<{
   isGatewayLifecycleActive: () => boolean;
   getPendingOwnerPublication: (agentId: string) => Promise<unknown> | undefined;
@@ -87,6 +101,10 @@ export class PreparedReplyDispatchPublicationOwner {
     this.#publication = this.host.isGatewayLifecycleActive()
       ? buildReplyDispatchPublication(owners)
       : EMPTY_REPLY_DISPATCH_PUBLICATION;
+  }
+
+  remove(agentIds: ReadonlySet<string>): void {
+    this.#publication = removeReplyDispatchRuntimeProjections(this.#publication, agentIds);
   }
 
   readonly load = async ({
