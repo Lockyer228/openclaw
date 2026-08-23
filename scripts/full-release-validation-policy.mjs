@@ -1337,6 +1337,7 @@ export function releasePlanGateFailures(gates) {
 export function releaseStateChildEvidence(child) {
   return canonicalValue({
     compositeJobsSha256: child.compositeJobsSha256,
+    conclusion: child.conclusion,
     dispatchActor: child.dispatchActor,
     effectiveRunAttempt: child.runAttempt,
     jobs: child.timing.jobs.map((job) => ({
@@ -1352,6 +1353,7 @@ export function releaseStateChildEvidence(child) {
     plannedRunAttempt: child.plannedRunAttempt,
     repository: child.repository,
     runId: child.runId,
+    status: child.status,
     triggeringActor: child.triggeringActor,
     workflow: child.workflow,
     workflowRef: child.workflowRef,
