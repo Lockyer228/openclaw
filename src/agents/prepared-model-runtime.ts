@@ -589,6 +589,10 @@ async function drainPendingAuthMutations(options: { commit?: () => void } = {}):
         reusePluginGenerations: true,
       }),
     commit: options.commit,
+    onOwnerFailure: (error) => {
+      const refreshError = toStringifiedError(error);
+      log.warn(`auth-triggered model runtime refresh failed: ${String(refreshError)}`);
+    },
   });
 }
 
@@ -652,7 +656,15 @@ function invalidateForAuthMutation(event: PreparedModelRuntimeAuthMutation): voi
         if (!authPublication.prepareCommit(transaction)) {
           return;
         }
-        replyDispatchPublication.rebuild(owners.values());
+        const transactionOwners = authPublication.owners(transaction);
+        replyDispatchPublication.replace(
+          owners.values(),
+          new Set(
+            transactionOwners.flatMap((owner) =>
+              owner.input.agentId ? [owner.input.agentId] : [],
+            ),
+          ),
+        );
         authPublication.resolve(transaction, owners);
         notifyPreparedModelRuntimePublication({ phase: "published" });
       },

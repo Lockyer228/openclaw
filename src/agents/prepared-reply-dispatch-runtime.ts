@@ -73,6 +73,21 @@ function removeReplyDispatchRuntimeProjections(
   });
 }
 
+function replaceReplyDispatchRuntimeProjections(
+  publication: PreparedReplyDispatchPublication,
+  replacement: PreparedReplyDispatchPublication,
+  agentIds: ReadonlySet<string>,
+): PreparedReplyDispatchPublication {
+  return Object.freeze({
+    runtimes: Object.freeze(
+      [
+        ...publication.runtimes.filter((runtime) => !agentIds.has(runtime.agentId)),
+        ...replacement.runtimes,
+      ].toSorted((left, right) => left.agentId.localeCompare(right.agentId)),
+    ),
+  });
+}
+
 type PreparedReplyDispatchPublicationHost = Readonly<{
   isGatewayLifecycleActive: () => boolean;
   getPendingOwnerPublication: (agentId: string) => Promise<unknown> | undefined;
@@ -105,6 +120,19 @@ export class PreparedReplyDispatchPublicationOwner {
 
   remove(agentIds: ReadonlySet<string>): void {
     this.#publication = removeReplyDispatchRuntimeProjections(this.#publication, agentIds);
+  }
+
+  replace(owners: Iterable<PreparedModelRuntimeOwner>, agentIds: ReadonlySet<string>): void {
+    const replacements = buildReplyDispatchPublication(
+      [...owners].filter((owner) =>
+        owner.input.agentId ? agentIds.has(owner.input.agentId) : false,
+      ),
+    );
+    this.#publication = replaceReplyDispatchRuntimeProjections(
+      this.#publication,
+      replacements,
+      agentIds,
+    );
   }
 
   readonly load = async ({

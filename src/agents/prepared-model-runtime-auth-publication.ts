@@ -88,6 +88,10 @@ export class PreparedModelRuntimeAuthPublicationOwner {
     return true;
   }
 
+  owners(transaction: PreparedModelRuntimeAuthTransaction): readonly PreparedModelRuntimeOwner[] {
+    return [...transaction.ownerGates.keys()];
+  }
+
   resolve(
     transaction: PreparedModelRuntimeAuthTransaction,
     owners: Map<string, PreparedModelRuntimeOwner>,
@@ -136,6 +140,7 @@ export class PreparedModelRuntimeAuthPublicationOwner {
       }>,
     ) => Promise<void>;
     commit?: () => void;
+    onOwnerFailure?: (error: unknown) => void;
   }): Promise<void> {
     while (this.#events.length > 0) {
       const events = this.#events.splice(0);
@@ -152,17 +157,30 @@ export class PreparedModelRuntimeAuthPublicationOwner {
       try {
         await params.publish(entries);
       } catch (error) {
-        // A newer mutation supersedes this failed batch and already belongs to this worker.
-        // Keep draining so its corrective generation is never left without a publication owner.
-        const failedOwnersCovered = entries.every(({ owner }) =>
-          this.#events.some(
-            (event) =>
-              event.affectsInheritedStores ||
-              owner.input.agentDir === event.agentDir ||
-              owner.input.inheritedAuthDir === event.agentDir,
-          ),
+        const failedOwners = entries.filter(
+          ({ owner }) =>
+            !this.#events.some(
+              (event) =>
+                event.affectsInheritedStores ||
+                owner.input.agentDir === event.agentDir ||
+                owner.input.inheritedAuthDir === event.agentDir,
+            ),
         );
-        if (!failedOwnersCovered) {
+        for (const { owner } of failedOwners) {
+          const gate = this.#transaction?.ownerGates.get(owner);
+          if (gate) {
+            if (owner.pending === gate.promise) {
+              owner.pending = undefined;
+            }
+            this.#transaction?.ownerGates.delete(owner);
+            gate.reject(error);
+          }
+        }
+        if (failedOwners.length > 0) {
+          params.onOwnerFailure?.(error);
+        }
+        // Newer events remain owned by this worker even when they target independent owners.
+        if (this.#events.length === 0) {
           throw error;
         }
       }

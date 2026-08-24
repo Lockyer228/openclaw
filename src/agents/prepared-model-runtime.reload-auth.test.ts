@@ -181,4 +181,81 @@ describe("prepared model runtime reload auth adoption", () => {
       loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" }),
     ).resolves.toMatchObject({ config: replacementConfig });
   });
+
+  it("continues with a corrective auth mutation after the earlier build fails", async () => {
+    mocks.configuredAgentIds = ["default"];
+    const config = {};
+    const agentDir = "/tmp/unused-agent";
+    await refreshPreparedModelRuntimeSnapshots(config, { gatewayLifecycle: true });
+    const firstBuild = createDeferred<{ agentDir: string; wrote: false }>();
+    const secondBuild = createDeferred<{ agentDir: string; wrote: false }>();
+    const firstError = new Error("superseded auth build failed");
+    mocks.ensureOpenClawModelsJson
+      .mockImplementationOnce(async () => await firstBuild.promise)
+      .mockImplementationOnce(async () => await secondBuild.promise);
+
+    mocks.mutationListener?.({ agentDir, affectsInheritedStores: false });
+    await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(2));
+    const dispatch = loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" });
+    void dispatch.catch(() => undefined);
+    mocks.mutationListener?.({ agentDir, affectsInheritedStores: false });
+    firstBuild.reject(firstError);
+    await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(3));
+    await expect(
+      Promise.race([dispatch.then(() => "settled"), Promise.resolve("pending")]),
+    ).resolves.toBe("pending");
+
+    secondBuild.resolve({ agentDir, wrote: false });
+    await expect(dispatch).resolves.toMatchObject({ agentId: "default", agentDir });
+    expect(mocks.warn).not.toHaveBeenCalled();
+  });
+
+  it("publishes an independent queued owner after another auth build fails", async () => {
+    mocks.configuredAgentIds = ["default", "worker", "research"];
+    const config = {};
+    await refreshPreparedModelRuntimeSnapshots(config, { gatewayLifecycle: true });
+    const workerBuild = createDeferred<{ agentDir: string; wrote: false }>();
+    const researchBuild = createDeferred<{ agentDir: string; wrote: false }>();
+    const workerError = new Error("worker auth build failed");
+    mocks.ensureOpenClawModelsJson.mockImplementation(async (_config, agentDir) => {
+      if (agentDir === "/tmp/configured-worker") {
+        return await workerBuild.promise;
+      }
+      if (agentDir === "/tmp/configured-research") {
+        return await researchBuild.promise;
+      }
+      return { agentDir: String(agentDir), wrote: false };
+    });
+
+    mocks.mutationListener?.({
+      agentDir: "/tmp/configured-worker",
+      affectsInheritedStores: false,
+    });
+    await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(4));
+    const workerDispatch = loadPublishedGatewayReplyDispatchRuntime({ agentId: "worker" });
+    void workerDispatch.catch(() => undefined);
+    mocks.mutationListener?.({
+      agentDir: "/tmp/configured-research",
+      affectsInheritedStores: false,
+    });
+    const researchDispatch = loadPublishedGatewayReplyDispatchRuntime({ agentId: "research" });
+    void researchDispatch.catch(() => undefined);
+    workerBuild.reject(workerError);
+    await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(5));
+    await expect(workerDispatch).rejects.toBe(workerError);
+    await expect(
+      Promise.race([researchDispatch.then(() => "settled"), Promise.resolve("pending")]),
+    ).resolves.toBe("pending");
+
+    researchBuild.resolve({ agentDir: "/tmp/configured-research", wrote: false });
+    await expect(researchDispatch).resolves.toMatchObject({
+      agentId: "research",
+      agentDir: "/tmp/configured-research",
+    });
+    await expect(loadPublishedGatewayReplyDispatchRuntime({ agentId: "worker" })).rejects.toThrow(
+      "prepared reply dispatch runtime owner was not published for worker",
+    );
+    expect(mocks.warn).toHaveBeenCalledOnce();
+    expect(mocks.warn).toHaveBeenCalledWith(expect.stringContaining(workerError.message));
+  });
 });
