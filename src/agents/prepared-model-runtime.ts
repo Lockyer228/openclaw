@@ -4,6 +4,10 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.types.js";
 import { registerRuntimeAuthProfileStoreMutationListener } from "./auth-profiles/runtime-snapshots.js";
+import {
+  PreparedModelRuntimeAuthPublicationOwner,
+  type PreparedModelRuntimeAuthMutation,
+} from "./prepared-model-runtime-auth-publication.js";
 import { acquirePreparedModelRuntimeLeaseFromOwners } from "./prepared-model-runtime-lease.js";
 import { registerPreparedRuntimeAuthMaterializationPublisher } from "./prepared-model-runtime-materializations.js";
 import {
@@ -76,8 +80,7 @@ let gatewayLifecycleActive = false;
 let refreshTail: Promise<void> = Promise.resolve();
 let refreshRequestEpoch = 0;
 let pendingModelRuntimeReplacement: PreparedModelRuntimeReplacement | undefined;
-type AuthMutationEvent = { agentDir?: string; affectsInheritedStores: boolean };
-const pendingAuthMutations: AuthMutationEvent[] = [];
+const authPublication = new PreparedModelRuntimeAuthPublicationOwner();
 
 const replyDispatchPublication = new PreparedReplyDispatchPublicationOwner({
   isGatewayLifecycleActive: () => gatewayLifecycleActive,
@@ -375,6 +378,7 @@ export function markPreparedModelRuntimeSnapshotsStale(
   if (options.waitForReplacement) {
     const superseded = pendingModelRuntimeReplacement;
     pendingModelRuntimeReplacement = createPreparedModelRuntimeReplacement();
+    authPublication.adopt(pendingModelRuntimeReplacement.gateId);
     // Superseded readers retry against the newer replacement gate.
     superseded?.resolve();
   } else if (!options.preserveReplacementWait && pendingModelRuntimeReplacement) {
@@ -406,6 +410,7 @@ export function rejectPendingPreparedModelRuntimeReplacement(
   }
   pendingModelRuntimeReplacement = undefined;
   const replacementError = toStringifiedError(error);
+  authPublication.rejectAdopted(replacement.gateId, replacementError);
   replacement.reject(replacementError);
   notifyPreparedModelRuntimePublication({ phase: "failed", error: replacementError });
 }
@@ -504,8 +509,12 @@ export function refreshPreparedModelRuntimeSnapshots(
     ) {
       return;
     }
+    const adoptedAuthTransaction = authPublication.prepareAdoptedCommit(replacement.gateId);
     replyDispatchPublication.rebuild(owners.values());
     pendingModelRuntimeReplacement = undefined;
+    if (adoptedAuthTransaction) {
+      authPublication.resolve(adoptedAuthTransaction, owners);
+    }
     replacement.resolve();
     // Publication listeners may synchronously read the committed owner. Clear the lifecycle
     // gate before announcing availability so they cannot observe a false missing generation.
@@ -551,6 +560,7 @@ export function refreshPreparedModelRuntimeSnapshots(
       pendingModelRuntimeReplacement === replacement
     ) {
       pendingModelRuntimeReplacement = undefined;
+      authPublication.rejectAdopted(replacement.gateId, refreshError);
       replacement.reject(refreshError);
       notifyPreparedModelRuntimePublication({ phase: "failed", error: refreshError });
     }
@@ -567,45 +577,22 @@ function enqueuePreparedModelRuntimePublication(task: () => Promise<void>): Prom
   return publication;
 }
 
-async function drainPendingAuthMutations(
-  options: {
-    commit?: () => void;
-  } = {},
-): Promise<void> {
-  while (pendingAuthMutations.length > 0) {
-    const events = pendingAuthMutations.splice(0);
-    for (const event of events) {
-      event.agentDir = normalizeOptionalDir(event.agentDir);
-    }
-    const entries: Array<{
-      owner: PreparedModelRuntimeOwner;
-      input: PreparedModelRuntimeInput;
-    }> = [];
-    for (const owner of owners.values()) {
-      const affected = events.some(
-        (event) =>
-          event.affectsInheritedStores ||
-          owner.input.agentDir === event.agentDir ||
-          owner.input.inheritedAuthDir === event.agentDir,
-      );
-      if (affected) {
-        entries.push({ owner, input: owner.input });
-      }
-    }
-    await publishPreparedModelRuntimeOwnerBatch({
-      entries,
-      owners,
-      agentBuildCompletions,
-      buildTimeoutMs: modelRuntimeBuildTimeoutMs,
-      reusePluginGenerations: true,
-    });
-  }
-  // The queue check and commit share one synchronous section. A mutation cannot appear after the
-  // final drain but before its owning transaction publishes the resulting dispatch projection.
-  options.commit?.();
+async function drainPendingAuthMutations(options: { commit?: () => void } = {}): Promise<void> {
+  await authPublication.drain({
+    owners,
+    publish: async (entries) =>
+      await publishPreparedModelRuntimeOwnerBatch({
+        entries,
+        owners,
+        agentBuildCompletions,
+        buildTimeoutMs: modelRuntimeBuildTimeoutMs,
+        reusePluginGenerations: true,
+      }),
+    commit: options.commit,
+  });
 }
 
-function invalidateForAuthMutation(event: AuthMutationEvent): void {
+function invalidateForAuthMutation(event: PreparedModelRuntimeAuthMutation): void {
   const normalizedEvent = {
     ...event,
     agentDir: normalizeOptionalDir(event.agentDir),
@@ -635,60 +622,56 @@ function invalidateForAuthMutation(event: AuthMutationEvent): void {
     return;
   }
   replyDispatchPublication.remove(invalidatedConfiguredAgentIds);
-  pendingAuthMutations.push(normalizedEvent);
+  const transaction = authPublication.enqueue(normalizedEvent, invalidatedOwners);
   if (pendingModelRuntimeReplacement) {
     // The active config transaction drains this event before its atomic dispatch commit. Retire
     // the superseded build gate; queuing another task would make this commit depend on future work.
-    for (const owner of invalidatedOwners) {
-      owner.pending = undefined;
-    }
+    authPublication.adoptTransaction(transaction, pendingModelRuntimeReplacement.gateId);
     notifyPreparedModelRuntimePublication({ phase: "invalidated" });
     return;
   }
-  const ownerPublications = new Map<
-    PreparedModelRuntimeOwner,
-    Promise<PreparedModelRuntimeSnapshot>
-  >();
+  if (!authPublication.claimPublication(transaction)) {
+    notifyPreparedModelRuntimePublication({ phase: "invalidated" });
+    return;
+  }
   const publication = enqueuePreparedModelRuntimePublication(async () => {
     // A pending replacement gate means a queued config publication owns the next generation:
     // it drains queued auth mutations against the new config and rebuilds/announces the
     // dispatch publication. Rebuilding here would revive stale owners with the old config or
     // throw on them, emitting a spurious failed/published event that wedges chat metadata.
     if (pendingModelRuntimeReplacement) {
+      authPublication.adoptTransaction(transaction, pendingModelRuntimeReplacement.gateId);
       return;
     }
     await drainPendingAuthMutations({
       commit: () => {
         if (pendingModelRuntimeReplacement) {
+          authPublication.adoptTransaction(transaction, pendingModelRuntimeReplacement.gateId);
           return;
         }
-        for (const owner of invalidatedOwners) {
-          if (owner.pending === ownerPublications.get(owner)) {
-            owner.pending = undefined;
-          }
+        if (!authPublication.prepareCommit(transaction)) {
+          return;
         }
         replyDispatchPublication.rebuild(owners.values());
+        authPublication.resolve(transaction, owners);
         notifyPreparedModelRuntimePublication({ phase: "published" });
       },
     });
   });
-  for (const owner of invalidatedOwners) {
-    const pending = publication.then(() => owner.snapshot!);
-    ownerPublications.set(owner, pending);
-    owner.pending = pending;
-    const clearPending = () => {
-      if (owner.pending === pending) {
-        owner.pending = undefined;
-      }
-    };
-    void pending.then(clearPending, clearPending);
-  }
   notifyPreparedModelRuntimePublication({ phase: "invalidated" });
   void publication.catch((error: unknown) => {
+    if (!authPublication.isCurrent(transaction)) {
+      return;
+    }
+    if (pendingModelRuntimeReplacement) {
+      authPublication.adoptTransaction(transaction, pendingModelRuntimeReplacement.gateId);
+      return;
+    }
     if (error instanceof PreparedModelRuntimePublicationSupersededError) {
       return;
     }
     const refreshError = toStringifiedError(error);
+    authPublication.reject(transaction, refreshError);
     notifyPreparedModelRuntimePublication({ phase: "failed", error: refreshError });
     log.warn(`auth-triggered model runtime refresh failed: ${String(refreshError)}`);
   });
@@ -698,6 +681,11 @@ registerRuntimeAuthProfileStoreMutationListener(invalidateForAuthMutation);
 registerPreparedRuntimeAuthMaterializationPublisher(owners, notifyPreparedModelRuntimePublication);
 
 function resetPreparedModelRuntimeSnapshotsForTest(): void {
+  authPublication.reset(
+    new PreparedModelRuntimePublicationSupersededError(
+      "prepared model runtime auth publication reset for test",
+    ),
+  );
   pendingModelRuntimeReplacement?.resolve();
   pendingModelRuntimeReplacement = undefined;
   owners.clear();
@@ -707,7 +695,6 @@ function resetPreparedModelRuntimeSnapshotsForTest(): void {
   gatewayLifecycleActive = false;
   refreshTail = Promise.resolve();
   refreshRequestEpoch = 0;
-  pendingAuthMutations.length = 0;
   replyDispatchPublication.clear();
   resetPreparedModelRuntimePublicationListenersForTest();
   modelRuntimeBuildTimeoutMs = DEFAULT_MODEL_RUNTIME_BUILD_TIMEOUT_MS;

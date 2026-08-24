@@ -108,4 +108,77 @@ describe("prepared model runtime reload auth adoption", () => {
     expect(lease.snapshot.config).toBe(replacementConfig);
     lease.release();
   });
+
+  it("adopts an in-flight auth gate into a same-owner config reload", async () => {
+    mocks.configuredAgentIds = ["default"];
+    const initialConfig = {};
+    const replacementConfig = { plugins: {} };
+    await refreshPreparedModelRuntimeSnapshots(initialConfig, { gatewayLifecycle: true });
+    const authBuild = createDeferred<{ agentDir: string; wrote: false }>();
+    const configBuild = createDeferred<{ agentDir: string; wrote: false }>();
+    const events: string[] = [];
+    const unregister = registerPreparedModelRuntimePublicationListener((event) => {
+      events.push(event.phase);
+    });
+    mocks.ensureOpenClawModelsJson
+      .mockImplementationOnce(async () => await authBuild.promise)
+      .mockImplementationOnce(async () => await configBuild.promise);
+
+    mocks.mutationListener?.({ agentDir: "/tmp/unused-agent", affectsInheritedStores: false });
+    await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(2));
+    const authWaiter = loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" });
+    void authWaiter.catch(() => undefined);
+    const reload = refreshPreparedModelRuntimeSnapshots(replacementConfig, {
+      gatewayLifecycle: true,
+    });
+    void reload.catch(() => undefined);
+    authBuild.resolve({ agentDir: "/tmp/unused-agent", wrote: false });
+    await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(3));
+    await expect(
+      Promise.race([authWaiter.then(() => "settled"), Promise.resolve("pending")]),
+    ).resolves.toBe("pending");
+
+    configBuild.resolve({ agentDir: "/tmp/unused-agent", wrote: false });
+    await expect(reload).resolves.toBeUndefined();
+    const runtime = await authWaiter;
+    unregister();
+
+    expect(runtime?.config).toBe(replacementConfig);
+    expect(events.filter((phase) => phase === "published")).toHaveLength(1);
+    expect(events).not.toContain("failed");
+    expect(mocks.warn).not.toHaveBeenCalled();
+  });
+
+  it("rejects an adopted auth gate when config reload fails and permits recovery", async () => {
+    mocks.configuredAgentIds = ["default"];
+    const initialConfig = {};
+    const replacementConfig = { plugins: {} };
+    await refreshPreparedModelRuntimeSnapshots(initialConfig, { gatewayLifecycle: true });
+    const authBuild = createDeferred<{ agentDir: string; wrote: false }>();
+    const reloadError = new Error("replacement config failed");
+    mocks.ensureOpenClawModelsJson
+      .mockImplementationOnce(async () => await authBuild.promise)
+      .mockRejectedValueOnce(reloadError);
+
+    mocks.mutationListener?.({ agentDir: "/tmp/unused-agent", affectsInheritedStores: false });
+    await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(2));
+    const authWaiter = loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" });
+    void authWaiter.catch(() => undefined);
+    const reload = refreshPreparedModelRuntimeSnapshots(replacementConfig, {
+      gatewayLifecycle: true,
+    });
+    void reload.catch(() => undefined);
+    authBuild.resolve({ agentDir: "/tmp/unused-agent", wrote: false });
+
+    await expect(reload).rejects.toBe(reloadError);
+    await expect(authWaiter).rejects.toBe(reloadError);
+    await expect(loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" })).rejects.toThrow(
+      "prepared reply dispatch runtime owner was not published for default",
+    );
+
+    await refreshPreparedModelRuntimeSnapshots(replacementConfig, { gatewayLifecycle: true });
+    await expect(
+      loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" }),
+    ).resolves.toMatchObject({ config: replacementConfig });
+  });
 });

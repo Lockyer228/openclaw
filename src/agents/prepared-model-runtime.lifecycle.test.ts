@@ -878,29 +878,50 @@ describe("prepared model runtime snapshots", () => {
     expect(mocks.warn).not.toHaveBeenCalled();
   });
 
-  it("rejects a deduplicated caller when an auth refresh is superseded", async () => {
+  it("keeps one dispatch gate across overlapping auth mutations", async () => {
+    mocks.configuredAgentIds = ["default"];
     const config = {};
-    const agentDir = "/tmp/prepared-model-runtime-auth-pending-superseded";
-    await publishPreparedModelRuntimeSnapshot({ config, agentDir });
+    const agentDir = "/tmp/unused-agent";
+    await refreshPreparedModelRuntimeSnapshots(config, { gatewayLifecycle: true });
+    const events: string[] = [];
+    const unregister = registerPreparedModelRuntimePublicationListener((event) => {
+      events.push(event.phase);
+    });
     let finishFirstRefresh: (() => void) | undefined;
-    mocks.ensureOpenClawModelsJson.mockImplementationOnce(
-      async () =>
-        await new Promise<{ agentDir: string; wrote: false }>((resolve) => {
-          finishFirstRefresh = () => resolve({ agentDir, wrote: false });
-        }),
-    );
+    let finishSecondRefresh: (() => void) | undefined;
+    mocks.ensureOpenClawModelsJson
+      .mockImplementationOnce(
+        async () =>
+          await new Promise<{ agentDir: string; wrote: false }>((resolve) => {
+            finishFirstRefresh = () => resolve({ agentDir, wrote: false });
+          }),
+      )
+      .mockImplementationOnce(
+        async () =>
+          await new Promise<{ agentDir: string; wrote: false }>((resolve) => {
+            finishSecondRefresh = () => resolve({ agentDir, wrote: false });
+          }),
+      );
 
     mocks.mutationListener?.({ agentDir, affectsInheritedStores: false });
     await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(2));
-    const deduplicated = publishPreparedModelRuntimeSnapshot({ config, agentDir });
+    const dispatch = loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" });
+    void dispatch.catch(() => undefined);
     mocks.mutationListener?.({ agentDir, affectsInheritedStores: false });
     finishFirstRefresh?.();
-
-    await expect(deduplicated).rejects.toThrow("superseded");
     await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(3));
-    await expect(prepareModelRuntimeSnapshot({ config, agentDir })).resolves.toMatchObject({
-      agentDir,
-    });
+    await expect(
+      Promise.race([dispatch.then(() => "settled"), Promise.resolve("pending")]),
+    ).resolves.toBe("pending");
+
+    finishSecondRefresh?.();
+    const runtime = await dispatch;
+    unregister();
+
+    expect(runtime).toBe(await loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" }));
+    expect(events.filter((phase) => phase === "published")).toHaveLength(1);
+    expect(events).not.toContain("failed");
+    expect(mocks.warn).not.toHaveBeenCalled();
   });
 
   it("does not let a superseded owner hide a genuine sibling refresh failure", async () => {
