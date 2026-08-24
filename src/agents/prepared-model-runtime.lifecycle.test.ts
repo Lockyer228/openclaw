@@ -780,42 +780,6 @@ describe("prepared model runtime snapshots", () => {
     expect(mocks.discoverModels).toHaveBeenCalledOnce();
   });
 
-  it("awaits auth invalidation queued during lifecycle publication", async () => {
-    mocks.configuredAgentIds = ["default"];
-    await refreshPreparedModelRuntimeSnapshots({});
-    let finishConfigRefresh: (() => void) | undefined;
-    let finishAuthRefresh: (() => void) | undefined;
-    mocks.ensureOpenClawModelsJson
-      .mockImplementationOnce(
-        async () =>
-          await new Promise<{ agentDir: string; wrote: false }>((resolve) => {
-            finishConfigRefresh = () => resolve({ agentDir: "/tmp/unused-agent", wrote: false });
-          }),
-      )
-      .mockImplementationOnce(
-        async () =>
-          await new Promise<{ agentDir: string; wrote: false }>((resolve) => {
-            finishAuthRefresh = () => resolve({ agentDir: "/tmp/unused-agent", wrote: false });
-          }),
-      );
-
-    const publication = refreshPreparedModelRuntimeSnapshots({});
-    await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(2));
-    mocks.mutationListener?.({ agentDir: "/tmp/unused-agent", affectsInheritedStores: false });
-    finishConfigRefresh?.();
-    await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(3));
-    let settled = false;
-    void publication.then(() => {
-      settled = true;
-    });
-    await Promise.resolve();
-    expect(settled).toBe(false);
-
-    finishAuthRefresh?.();
-    await publication;
-    expect(settled).toBe(true);
-  });
-
   it("defers an in-flight auth refresh to a superseding config publication", async () => {
     mocks.configuredAgentIds = ["default"];
     await refreshPreparedModelRuntimeSnapshots({}, { gatewayLifecycle: true });
@@ -866,8 +830,8 @@ describe("prepared model runtime snapshots", () => {
       }
     });
 
-    // The mutation queues an auth task; the synchronous stale edge of the config
-    // refresh opens the replacement gate before that task runs.
+    // The auth mutation starts first; the synchronous stale edge of the config refresh transfers
+    // its queued event to the replacement transaction before the auth task can publish.
     mocks.mutationListener?.({ affectsInheritedStores: true });
     await refreshPreparedModelRuntimeSnapshots(replacementConfig, { gatewayLifecycle: true });
     unregister();

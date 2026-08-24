@@ -116,14 +116,14 @@ export class PreparedReplyDispatchPublicationOwner {
       if (!this.host.isGatewayLifecycleActive()) {
         return undefined;
       }
-      const pendingOwner = this.host.getPendingOwnerPublication(agentId);
-      if (pendingOwner) {
-        await pendingOwner;
-        continue;
-      }
       const replacement = this.host.getPendingReplacement();
       if (replacement) {
         await replacement;
+        continue;
+      }
+      const pendingOwner = this.host.getPendingOwnerPublication(agentId);
+      if (pendingOwner) {
+        await pendingOwner;
         continue;
       }
       const matches = this.#publication.runtimes.filter((runtime) => runtime.agentId === agentId);
