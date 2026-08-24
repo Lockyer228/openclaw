@@ -16,6 +16,7 @@ type PreparedModelRuntimeAuthTransaction = {
   adoptedBy?: PreparedModelRuntimeReplacementGateId;
   ownerGates: Map<PreparedModelRuntimeOwner, Deferred<PreparedModelRuntimeSnapshot>>;
   publicationQueued: boolean;
+  readyOwners: Set<PreparedModelRuntimeOwner>;
 };
 
 export class PreparedModelRuntimeAuthPublicationOwner {
@@ -29,8 +30,13 @@ export class PreparedModelRuntimeAuthPublicationOwner {
     this.#events.push(event);
     const transaction =
       this.#transaction ??
-      (this.#transaction = { ownerGates: new Map(), publicationQueued: false });
+      (this.#transaction = {
+        ownerGates: new Map(),
+        publicationQueued: false,
+        readyOwners: new Set(),
+      });
     for (const owner of invalidatedOwners) {
+      transaction.readyOwners.delete(owner);
       let gate = transaction.ownerGates.get(owner);
       if (!gate) {
         gate = createDeferredCore<PreparedModelRuntimeSnapshot>();
@@ -156,7 +162,16 @@ export class PreparedModelRuntimeAuthPublicationOwner {
         .map((owner) => ({ owner, input: owner.input }));
       try {
         await params.publish(entries);
+        for (const { owner } of entries) {
+          if (!owner.needsRefresh) {
+            this.#transaction?.readyOwners.add(owner);
+          }
+        }
       } catch (error) {
+        if (this.#transaction?.adoptedBy) {
+          // The replacement transaction exclusively settles adopted gates from its own result.
+          throw error;
+        }
         const failedOwners = entries.filter(
           ({ owner }) =>
             !this.#events.some(
@@ -167,6 +182,7 @@ export class PreparedModelRuntimeAuthPublicationOwner {
             ),
         );
         for (const { owner } of failedOwners) {
+          this.#transaction?.readyOwners.delete(owner);
           const gate = this.#transaction?.ownerGates.get(owner);
           if (gate) {
             if (owner.pending === gate.promise) {
@@ -180,7 +196,7 @@ export class PreparedModelRuntimeAuthPublicationOwner {
           params.onOwnerFailure?.(error);
         }
         // Newer events remain owned by this worker even when they target independent owners.
-        if (this.#events.length === 0) {
+        if (this.#events.length === 0 && this.#transaction?.readyOwners.size === 0) {
           throw error;
         }
       }

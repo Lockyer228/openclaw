@@ -258,4 +258,77 @@ describe("prepared model runtime reload auth adoption", () => {
     expect(mocks.warn).toHaveBeenCalledOnce();
     expect(mocks.warn).toHaveBeenCalledWith(expect.stringContaining(workerError.message));
   });
+
+  it("commits a successful owner when the final independent owner fails", async () => {
+    mocks.configuredAgentIds = ["default", "worker", "research"];
+    const config = {};
+    await refreshPreparedModelRuntimeSnapshots(config, { gatewayLifecycle: true });
+    const workerBuild = createDeferred<{ agentDir: string; wrote: false }>();
+    const researchBuild = createDeferred<{ agentDir: string; wrote: false }>();
+    const researchError = new Error("final research auth build failed");
+    mocks.ensureOpenClawModelsJson.mockImplementation(async (_config, agentDir) => {
+      if (agentDir === "/tmp/configured-worker") {
+        return await workerBuild.promise;
+      }
+      if (agentDir === "/tmp/configured-research") {
+        return await researchBuild.promise;
+      }
+      return { agentDir: String(agentDir), wrote: false };
+    });
+
+    mocks.mutationListener?.({
+      agentDir: "/tmp/configured-worker",
+      affectsInheritedStores: false,
+    });
+    await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(4));
+    const workerDispatch = loadPublishedGatewayReplyDispatchRuntime({ agentId: "worker" });
+    void workerDispatch.catch(() => undefined);
+    mocks.mutationListener?.({
+      agentDir: "/tmp/configured-research",
+      affectsInheritedStores: false,
+    });
+    const researchDispatch = loadPublishedGatewayReplyDispatchRuntime({ agentId: "research" });
+    void researchDispatch.catch(() => undefined);
+    workerBuild.resolve({ agentDir: "/tmp/configured-worker", wrote: false });
+    await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(5));
+    researchBuild.reject(researchError);
+
+    await expect(workerDispatch).resolves.toMatchObject({ agentId: "worker" });
+    await expect(researchDispatch).rejects.toBe(researchError);
+    await expect(loadPublishedGatewayReplyDispatchRuntime({ agentId: "research" })).rejects.toThrow(
+      "prepared reply dispatch runtime owner was not published for research",
+    );
+  });
+
+  it("lets an adopting reload settle the gate after the obsolete auth build fails", async () => {
+    mocks.configuredAgentIds = ["default"];
+    const initialConfig = {};
+    const replacementConfig = { plugins: {} };
+    await refreshPreparedModelRuntimeSnapshots(initialConfig, { gatewayLifecycle: true });
+    const authBuild = createDeferred<{ agentDir: string; wrote: false }>();
+    const configBuild = createDeferred<{ agentDir: string; wrote: false }>();
+    const obsoleteAuthError = new Error("obsolete auth build failed");
+    mocks.ensureOpenClawModelsJson
+      .mockImplementationOnce(async () => await authBuild.promise)
+      .mockImplementationOnce(async () => await configBuild.promise);
+
+    mocks.mutationListener?.({ agentDir: "/tmp/unused-agent", affectsInheritedStores: false });
+    await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(2));
+    const authWaiter = loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" });
+    void authWaiter.catch(() => undefined);
+    const reload = refreshPreparedModelRuntimeSnapshots(replacementConfig, {
+      gatewayLifecycle: true,
+    });
+    void reload.catch(() => undefined);
+    authBuild.reject(obsoleteAuthError);
+    await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(3));
+    await expect(
+      Promise.race([authWaiter.then(() => "settled"), Promise.resolve("pending")]),
+    ).resolves.toBe("pending");
+
+    configBuild.resolve({ agentDir: "/tmp/unused-agent", wrote: false });
+    await expect(reload).resolves.toBeUndefined();
+    await expect(authWaiter).resolves.toMatchObject({ config: replacementConfig });
+    expect(mocks.warn).not.toHaveBeenCalled();
+  });
 });
