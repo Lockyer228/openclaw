@@ -149,7 +149,23 @@ export class PreparedModelRuntimeAuthPublicationOwner {
           ),
         )
         .map((owner) => ({ owner, input: owner.input }));
-      await params.publish(entries);
+      try {
+        await params.publish(entries);
+      } catch (error) {
+        // A newer mutation supersedes this failed batch and already belongs to this worker.
+        // Keep draining so its corrective generation is never left without a publication owner.
+        const failedOwnersCovered = entries.every(({ owner }) =>
+          this.#events.some(
+            (event) =>
+              event.affectsInheritedStores ||
+              owner.input.agentDir === event.agentDir ||
+              owner.input.inheritedAuthDir === event.agentDir,
+          ),
+        );
+        if (!failedOwnersCovered) {
+          throw error;
+        }
+      }
     }
     // The queue check and commit share one synchronous section so no mutation can be orphaned.
     params.commit?.();

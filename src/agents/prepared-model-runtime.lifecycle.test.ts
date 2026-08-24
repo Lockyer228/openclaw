@@ -6,6 +6,7 @@ import {
   resetPreparedModelRuntimeHarness,
 } from "./prepared-model-runtime.test-harness.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createDeferred } from "../../test/helpers/promise.js";
 import { retainLegacyDefaultAgentId } from "../config/legacy.default-agent-owner.js";
 import {
   acquireAgentRunPreparedModelRuntime,
@@ -921,6 +922,34 @@ describe("prepared model runtime snapshots", () => {
     expect(runtime).toBe(await loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" }));
     expect(events.filter((phase) => phase === "published")).toHaveLength(1);
     expect(events).not.toContain("failed");
+    expect(mocks.warn).not.toHaveBeenCalled();
+  });
+
+  it("continues with a corrective auth mutation after the earlier build fails", async () => {
+    mocks.configuredAgentIds = ["default"];
+    const config = {};
+    const agentDir = "/tmp/unused-agent";
+    await refreshPreparedModelRuntimeSnapshots(config, { gatewayLifecycle: true });
+    const firstBuild = createDeferred<{ agentDir: string; wrote: false }>();
+    const secondBuild = createDeferred<{ agentDir: string; wrote: false }>();
+    const firstError = new Error("superseded auth build failed");
+    mocks.ensureOpenClawModelsJson
+      .mockImplementationOnce(async () => await firstBuild.promise)
+      .mockImplementationOnce(async () => await secondBuild.promise);
+
+    mocks.mutationListener?.({ agentDir, affectsInheritedStores: false });
+    await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(2));
+    const dispatch = loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" });
+    void dispatch.catch(() => undefined);
+    mocks.mutationListener?.({ agentDir, affectsInheritedStores: false });
+    firstBuild.reject(firstError);
+    await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(3));
+    await expect(
+      Promise.race([dispatch.then(() => "settled"), Promise.resolve("pending")]),
+    ).resolves.toBe("pending");
+
+    secondBuild.resolve({ agentDir, wrote: false });
+    await expect(dispatch).resolves.toMatchObject({ agentId: "default", agentDir });
     expect(mocks.warn).not.toHaveBeenCalled();
   });
 
