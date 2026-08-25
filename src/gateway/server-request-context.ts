@@ -47,6 +47,7 @@ type GatewayRequestContextParams = {
   questionManager?: GatewayRequestContext["questionManager"];
   cancelRunBoundApprovals?: (runId: string, context: GatewayRequestContext) => number;
   forwardPluginApprovalRequest?: GatewayRequestContext["forwardPluginApprovalRequest"];
+  approvalWebPushDelivery?: GatewayRequestContext["approvalWebPushDelivery"];
   pluginApprovalIosPushDelivery?: GatewayRequestContext["pluginApprovalIosPushDelivery"];
   pluginApprovalManager: GatewayRequestContext["pluginApprovalManager"];
   systemAgentApprovalManager?: GatewayRequestContext["systemAgentApprovalManager"];
@@ -202,6 +203,7 @@ export function createGatewayRequestContext(
       ? (runId) => params.cancelRunBoundApprovals!(runId, context)
       : undefined,
     forwardPluginApprovalRequest: params.forwardPluginApprovalRequest,
+    approvalWebPushDelivery: params.approvalWebPushDelivery,
     pluginApprovalIosPushDelivery: params.pluginApprovalIosPushDelivery,
     pluginApprovalManager: params.pluginApprovalManager,
     systemAgentApprovalManager: params.systemAgentApprovalManager,
