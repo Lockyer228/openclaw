@@ -128,6 +128,21 @@ async function invokeConfigPatch(args: {
   return harness;
 }
 
+function startConfigPatch(args: { raw: unknown; baseHash?: string }) {
+  const harness = createConfigHandlerHarness({
+    method: "config.patch",
+    params: {
+      raw: JSON.stringify(args.raw),
+      ...(args.baseHash ? { baseHash: args.baseHash } : {}),
+    },
+  });
+  const handler = expectDefined(
+    configHandlers["config.patch"],
+    'configHandlers["config.patch"] test invariant',
+  );
+  return { harness, operation: handler(harness.options) };
+}
+
 async function invokeConfigSchema() {
   const harness = createConfigHandlerHarness({ method: "config.schema" });
   await expectDefined(
@@ -183,6 +198,67 @@ afterEach(() => {
   clearConfigSchemaResponseCacheForTests();
   resetPluginRuntimeStateForTest();
   vi.clearAllMocks();
+});
+
+describe("config.patch application settlement", () => {
+  it("does not acknowledge a persisted write before its runtime application", async () => {
+    let settleApplication!: (status: "applied") => void;
+    const application = new Promise<"applied">((resolve) => {
+      settleApplication = resolve;
+    });
+    configWriteMocks.commitGatewayConfigWrite.mockImplementationOnce(async () => ({
+      path: "/tmp/openclaw.json",
+      config: { hooks: { enabled: true } },
+      hash: "settled-hash",
+      application,
+      queueFollowUp: vi.fn(),
+    }));
+
+    const { harness, operation } = startConfigPatch({
+      raw: { hooks: { enabled: true } },
+      baseHash: "base-hash",
+    });
+    await vi.waitFor(() =>
+      expect(configWriteMocks.commitGatewayConfigWrite).toHaveBeenCalledOnce(),
+    );
+
+    expect(harness.respond).not.toHaveBeenCalled();
+
+    settleApplication("applied");
+    await operation;
+    expect(harness.respond).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({ ok: true }),
+      undefined,
+    );
+  });
+
+  it("reports a persisted write whose runtime application was superseded", async () => {
+    const queueFollowUp = vi.fn();
+    configWriteMocks.commitGatewayConfigWrite.mockResolvedValueOnce({
+      path: "/tmp/openclaw.json",
+      config: { hooks: { enabled: true } },
+      hash: "superseded-hash",
+      application: Promise.resolve("superseded" as const),
+      queueFollowUp,
+    });
+
+    const { harness, operation } = startConfigPatch({
+      raw: { hooks: { enabled: true } },
+      baseHash: "base-hash",
+    });
+    await operation;
+
+    expect(harness.respond).toHaveBeenCalledWith(
+      false,
+      undefined,
+      expect.objectContaining({
+        code: "UNAVAILABLE",
+        message: expect.stringContaining("persisted but was not applied"),
+      }),
+    );
+    expect(queueFollowUp).toHaveBeenCalledOnce();
+  });
 });
 
 describe("config.openFile", () => {

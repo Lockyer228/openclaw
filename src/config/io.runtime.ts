@@ -44,6 +44,10 @@ import {
   type RuntimeConfigSnapshotRefreshOptions,
   type RuntimeConfigWritePreparedCandidate,
 } from "./runtime-snapshot.js";
+import {
+  attachRuntimeConfigWriteApplication,
+  getRuntimeConfigWriteApplication,
+} from "./runtime-write-application.js";
 import type { ConfigFileSnapshot, OpenClawConfig } from "./types.js";
 
 export function clearConfigCache(): void {
@@ -441,17 +445,20 @@ async function finalizeCommittedConfigWrite(params: {
       ]),
     );
     notifyRuntimeConfigWriteListeners(
-      createRuntimeConfigWriteNotification({
-        configPath: io.configPath,
-        sourceConfig: canonicalSourceConfig,
-        runtimeConfig: notificationRuntimeConfig,
-        persistedHash: writeResult.persistedHash,
-        afterWrite: options.afterWrite,
-        runtimeRefresh: options.runtimeRefresh,
-        ...(notificationPreparedCandidates.size > 0
-          ? { preparedCandidatesByOwner: notificationPreparedCandidates }
-          : {}),
-      }),
+      attachRuntimeConfigWriteApplication(
+        createRuntimeConfigWriteNotification({
+          configPath: io.configPath,
+          sourceConfig: canonicalSourceConfig,
+          runtimeConfig: notificationRuntimeConfig,
+          persistedHash: writeResult.persistedHash,
+          afterWrite: options.afterWrite,
+          runtimeRefresh: options.runtimeRefresh,
+          ...(notificationPreparedCandidates.size > 0
+            ? { preparedCandidatesByOwner: notificationPreparedCandidates }
+            : {}),
+        }),
+        getRuntimeConfigWriteApplication(options),
+      ),
     );
   };
 

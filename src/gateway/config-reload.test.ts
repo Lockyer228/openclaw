@@ -15,6 +15,10 @@ import type {
 } from "../config/config.js";
 import { createConfigIO } from "../config/io.js";
 import { hashRuntimeConfigValue } from "../config/runtime-snapshot.js";
+import {
+  attachRuntimeConfigWriteApplication,
+  createRuntimeConfigWriteApplication,
+} from "../config/runtime-write-application.js";
 import type { PluginInstallRecord } from "../config/types.plugins.js";
 import { resetPluginRuntimeStateForTest, setActivePluginRegistry } from "../plugins/runtime.js";
 import {
@@ -1621,6 +1625,39 @@ describe("startGatewayConfigReloader", () => {
         authoredConfig: makeZeroDebounceHookSnapshot("internal-write").parsed,
       }),
     );
+    await harness.reloader.stop();
+  });
+
+  it("settles an in-process write only after its hot reload commits", async () => {
+    let releaseHotReload!: () => void;
+    const hotReloadGate = new Promise<void>((resolve) => {
+      releaseHotReload = resolve;
+    });
+    const application = createRuntimeConfigWriteApplication();
+    const harness = createReloaderHarness(vi.fn(), {
+      initialSnapshotRawHash: null,
+      initialAuthoredConfig: {},
+      onHotReload: async () => await hotReloadGate,
+    });
+    let settled = false;
+    void application.result.then(() => {
+      settled = true;
+    });
+
+    harness.emitWrite(
+      attachRuntimeConfigWriteApplication(
+        makeZeroDebounceHookWrite("application-settlement"),
+        application,
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(harness.onHotReload).toHaveBeenCalledOnce());
+
+    expect(application.claimed).toBe(true);
+    expect(settled).toBe(false);
+
+    releaseHotReload();
+    await expect(application.result).resolves.toBe("applied");
     await harness.reloader.stop();
   });
 

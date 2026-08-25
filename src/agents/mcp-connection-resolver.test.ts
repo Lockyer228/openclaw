@@ -333,7 +333,7 @@ describe("mcp connection resolver helpers", () => {
           reconcileExitWatchers: async () => {},
           reconcileStreamWatchers: async () => {},
           stopStreamWatchers: async () => {},
-          reconcileHeartbeatJobs: async () => {},
+          reconcileHeartbeatJobs: async () => "converged" as const,
         },
         channelHealthMonitor: null,
       };
