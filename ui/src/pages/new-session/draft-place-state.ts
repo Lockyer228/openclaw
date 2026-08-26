@@ -137,8 +137,8 @@ export class DraftPlaceState {
     return this.agentsHydratedValue;
   }
 
-  get worktreePreferenceReady(): boolean {
-    return this.repositoryState.preferenceReady;
+  get placementPreferenceReady(): boolean {
+    return this.repositoryState.preferenceReady && this.preferredWhereRestore === null;
   }
 
   canAdoptGroupDefaults(): boolean {
@@ -633,11 +633,8 @@ export class DraftPlaceState {
       this.gateway.cloudProfilesReady
     ) {
       const automatic = preferredWhere.kind === "auto-device";
-      this.autoDeviceValue = automatic && this.devices().some((device) => device.selectable);
-      this.deviceIdValue =
-        preferredWhere.kind === "device" && this.findDevice(preferredWhere.id)?.selectable === true
-          ? preferredWhere.id
-          : "";
+      this.autoDeviceValue = automatic;
+      this.deviceIdValue = preferredWhere.kind === "device" ? preferredWhere.id : "";
       this.cloudProfileIdValue = "";
       this.repositoryState.forceWorktree(this.remotePlacement);
       this.preferredWhereRestore = null;

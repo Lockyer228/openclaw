@@ -105,7 +105,6 @@ extensions/feishu/src/outbound.ts
 extensions/feishu/src/reply-dispatcher.test.ts
 extensions/feishu/src/reply-dispatcher.ts
 extensions/feishu/src/streaming-card.test.ts
-extensions/file-transfer/src/shared/node-invoke-policy.ts
 extensions/firecrawl/src/firecrawl-tools.test.ts
 extensions/github-copilot/index.test.ts
 extensions/google-meet/index.test.ts
@@ -282,7 +281,6 @@ packages/ai/src/providers/google-shared.ts
 packages/ai/src/providers/mistral.ts
 packages/ai/src/providers/openai-chatgpt-responses.ts
 packages/ai/src/providers/openai-completions.test.ts
-packages/ai/src/providers/openai-completions.ts
 packages/ai/src/providers/openai-responses-shared.test.ts
 packages/ai/src/transports/anthropic-transport-stream.test.ts
 packages/ai/src/transports/anthropic-transport-stream.ts
@@ -320,7 +318,6 @@ src/agents/bash-tools.exec-host-gateway.ts
 src/agents/bash-tools.exec-host-node.test.ts
 src/agents/bash-tools.exec-runtime.ts
 src/agents/bash-tools.exec.approval-id.test.ts
-src/agents/bash-tools.process.ts
 src/agents/btw.test.ts
 src/agents/btw.ts
 src/agents/cli-runner.reliability.test.ts

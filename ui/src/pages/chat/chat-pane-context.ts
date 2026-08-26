@@ -318,7 +318,7 @@ export abstract class ChatPaneContext extends ChatPaneLifecycle {
     const resumedHistory =
       !wasConnected && state.connected ? resumePendingChatHistoryLoad(state) : undefined;
     if (sourceChanged) {
-      retireSessionWorkspaceCheckout(state, this.presented);
+      retireSessionWorkspaceCheckout(state);
     }
     if (!sourceChanged && previousMediaAuthToken !== resolveAssistantAttachmentAuthToken(state)) {
       releaseChatMediaResourceSubscriber(state.requestUpdate);
@@ -371,7 +371,10 @@ export abstract class ChatPaneContext extends ChatPaneLifecycle {
         deferBranches: true,
         historyLoad: resumedHistory,
       });
-      this.deferSessionHydrationUntilTranscript(state.sessionKey, historyRefresh);
+      this.deferSessionHydrationUntilTranscript(
+        state.sessionKey,
+        historyRefresh.then(() => getChatHistoryLoadState(state).phase === "committed"),
+      );
     }
     const routeSessionKey = this.sessionKey.trim();
     const catalogRouteKey = parseCatalogSessionKey(routeSessionKey);
@@ -460,7 +463,10 @@ export abstract class ChatPaneContext extends ChatPaneLifecycle {
         deferBranches: true,
         historyLoad: resumedHistory,
       });
-      this.deferSessionHydrationUntilTranscript(startupSessionKey, historyRefresh);
+      this.deferSessionHydrationUntilTranscript(
+        startupSessionKey,
+        historyRefresh.then(() => getChatHistoryLoadState(state).phase === "committed"),
+      );
       void historyRefresh.finally(() => {
         void finishStartup();
       });

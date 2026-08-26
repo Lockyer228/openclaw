@@ -52,6 +52,8 @@ import {
 import type { AuthRateLimiter } from "./auth-rate-limit.js";
 import type { ResolvedGatewayAuth } from "./auth.js";
 import {
+  parseGatewayJsonRequest,
+  sendInvalidRequest,
   sendJson,
   sendMissingScopeForbidden,
   setSseHeaders,
@@ -480,18 +482,10 @@ export async function handleOpenResponsesHttpRequest(
     return true;
   }
   const senderIsOwner = resolveOpenAiCompatibleHttpSenderIsOwner(req, handled.requestAuth);
-  // Validate request body with Zod
-  const parseResult = CreateResponseBodySchema.safeParse(handled.body);
-  if (!parseResult.success) {
-    const issue = parseResult.error.issues[0];
-    const message = issue ? `${issue.path.join(".")}: ${issue.message}` : "Invalid request body";
-    sendJson(res, 400, {
-      error: { message, type: "invalid_request_error" },
-    });
+  const payload = parseGatewayJsonRequest(res, handled.body, CreateResponseBodySchema);
+  if (!payload) {
     return true;
   }
-
-  const payload: CreateResponseBody = parseResult.data;
   const stream = Boolean(payload.stream);
   const model = payload.model;
   const user = payload.user;
@@ -504,9 +498,7 @@ export async function handleOpenResponsesHttpRequest(
       isInvalidGatewayModelError(err) ||
       isUnknownGatewayAgentError(err)
     ) {
-      sendJson(res, 400, {
-        error: { message: err.message, type: "invalid_request_error" },
-      });
+      sendInvalidRequest(res, err.message);
       return true;
     }
     throw err;
@@ -530,9 +522,7 @@ export async function handleOpenResponsesHttpRequest(
     model,
   });
   if (modelError) {
-    sendJson(res, 400, {
-      error: { message: modelError, type: "invalid_request_error" },
-    });
+    sendInvalidRequest(res, modelError);
     return true;
   }
 
@@ -637,9 +627,7 @@ export async function handleOpenResponsesHttpRequest(
     }
   } catch (err) {
     logWarn(`openresponses: request parsing failed: ${String(err)}`);
-    sendJson(res, 400, {
-      error: { message: "invalid request", type: "invalid_request_error" },
-    });
+    sendInvalidRequest(res, "invalid request");
     return true;
   }
 
@@ -657,9 +645,7 @@ export async function handleOpenResponsesHttpRequest(
     toolChoiceConstraint = toolChoiceResult.constraint;
   } catch (err) {
     logWarn(`openresponses: tool configuration failed: ${String(err)}`);
-    sendJson(res, 400, {
-      error: { message: "invalid tool configuration", type: "invalid_request_error" },
-    });
+    sendInvalidRequest(res, "invalid tool configuration");
     return true;
   }
   let resolved: ReturnType<typeof resolveGatewayRequestContext>;
@@ -679,9 +665,7 @@ export async function handleOpenResponsesHttpRequest(
       isInvalidGatewayModelError(err) ||
       isGatewaySessionKeyOverrideError(err)
     ) {
-      sendJson(res, 400, {
-        error: { message: err.message, type: "invalid_request_error" },
-      });
+      sendInvalidRequest(res, err.message);
       return true;
     }
     throw err;
@@ -726,17 +710,24 @@ export async function handleOpenResponsesHttpRequest(
     .join("\n\n");
 
   if (!prompt.message) {
-    sendJson(res, 400, {
-      error: {
-        message: "Missing user message in `input`.",
-        type: "invalid_request_error",
-      },
-    });
+    sendInvalidRequest(res, "Missing user message in `input`.");
     return true;
   }
 
   const responseId = `resp_${randomUUID()}`;
   const responseIdentity = { id: responseId, createdAt: Math.floor(Date.now() / 1000) };
+  const createFailedResponse = (
+    error: { code: string; message: string },
+    usage?: Usage,
+  ): ResponseResource =>
+    createResponseResource({
+      ...responseIdentity,
+      model,
+      status: "failed",
+      output: [],
+      error,
+      usage,
+    });
   const rememberResponseSession = () =>
     storeResponseSession(responseId, sessionKey, responseSessionScope);
   const outputItemId = `msg_${randomUUID()}`;
@@ -805,17 +796,13 @@ export async function handleOpenResponsesHttpRequest(
         toolChoiceConstraint &&
         !isToolChoiceConstraintSatisfied({ constraint: toolChoiceConstraint, pendingToolCalls })
       ) {
-        const failed = createResponseResource({
-          ...responseIdentity,
-          model,
-          status: "failed",
-          output: [],
-          error: {
+        const failed = createFailedResponse(
+          {
             code: "api_error",
             message: resolveUnsatisfiedToolChoiceMessage(toolChoiceConstraint),
           },
           usage,
-        });
+        );
         rememberResponseSession();
         sendJson(res, 502, failed);
         return true;
@@ -887,41 +874,25 @@ export async function handleOpenResponsesHttpRequest(
       }
       logWarn(`openresponses: non-stream response failed: ${String(err)}`);
       if (isClientToolNameConflictError(err)) {
-        const response = createResponseResource({
-          ...responseIdentity,
-          model,
-          status: "failed",
-          output: [],
-          error: { code: "invalid_request_error", message: "invalid tool configuration" },
+        const response = createFailedResponse({
+          code: "invalid_request_error",
+          message: "invalid tool configuration",
         });
         sendJson(res, 400, response);
         return true;
       }
-      const response = createResponseResource({
-        ...responseIdentity,
-        model,
-        status: "failed",
-        output: [],
-        error: { code: "api_error", message: "internal error" },
-      });
       const mapped = resolveOpenAiCompatError(err);
       if (mapped) {
-        const mappedResponse = createResponseResource({
-          ...responseIdentity,
-          model,
-          status: "failed",
-          output: [],
-          error: {
-            code: mapped.error.type,
-            message: mapped.error.message,
-          },
+        const mappedResponse = createFailedResponse({
+          code: mapped.error.type,
+          message: mapped.error.message,
         });
         rememberResponseSession();
         sendJson(res, mapped.status, mappedResponse);
         return true;
       }
       rememberResponseSession();
-      sendJson(res, 500, response);
+      sendJson(res, 500, createFailedResponse({ code: "api_error", message: "internal error" }));
     } finally {
       stopWatchingDisconnect();
     }
@@ -1063,17 +1034,13 @@ export async function handleOpenResponsesHttpRequest(
     }
     rememberResponseSession();
     finalizeFailedResponse(
-      createResponseResource({
-        ...responseIdentity,
-        model,
-        status: "failed",
-        output: [],
-        error: {
+      createFailedResponse(
+        {
           code: "server_error",
           message: "Assistant output cannot be represented as an append-only response stream.",
         },
         usage,
-      }),
+      ),
     );
   };
 
@@ -1262,14 +1229,10 @@ export async function handleOpenResponsesHttpRequest(
         return;
       }
       if (priorFinalization?.status === "failed" && terminalStreamFailed) {
-        const failedResponse = createResponseResource({
-          ...responseIdentity,
-          model,
-          status: "failed",
-          output: [],
-          error: { code: "server_error", message: "internal error" },
-          usage: finalUsage,
-        });
+        const failedResponse = createFailedResponse(
+          { code: "server_error", message: "internal error" },
+          finalUsage,
+        );
         rememberResponseSession();
         finalizeFailedResponse(failedResponse);
         return;
@@ -1295,17 +1258,13 @@ export async function handleOpenResponsesHttpRequest(
         toolChoiceConstraint &&
         !isToolChoiceConstraintSatisfied({ constraint: toolChoiceConstraint, pendingToolCalls })
       ) {
-        const failed = createResponseResource({
-          ...responseIdentity,
-          model,
-          status: "failed",
-          output: [],
-          error: {
+        const failed = createFailedResponse(
+          {
             code: "api_error",
             message: resolveUnsatisfiedToolChoiceMessage(toolChoiceConstraint),
           },
-          usage: finalUsage ?? createEmptyUsage(),
-        });
+          finalUsage ?? createEmptyUsage(),
+        );
         rememberResponseSession();
         finalizeFailedResponse(failed);
         return;
@@ -1444,46 +1403,31 @@ export async function handleOpenResponsesHttpRequest(
 
       finalUsage = finalUsage ?? createEmptyUsage();
       if (isClientToolNameConflictError(err)) {
-        const errorResponse = createResponseResource({
-          ...responseIdentity,
-          model,
-          status: "failed",
-          output: [],
-          error: { code: "invalid_request_error", message: "invalid tool configuration" },
-          usage: finalUsage,
-        });
-
-        finalizeFailedResponse(errorResponse);
+        finalizeFailedResponse(
+          createFailedResponse(
+            { code: "invalid_request_error", message: "invalid tool configuration" },
+            finalUsage,
+          ),
+        );
         return;
       }
-      const errorResponse = createResponseResource({
-        ...responseIdentity,
-        model,
-        status: "failed",
-        output: [],
-        error: { code: "api_error", message: "internal error" },
-        usage: finalUsage,
-      });
-
       const mapped = resolveOpenAiCompatError(err);
       if (mapped) {
-        const mappedResponse = createResponseResource({
-          ...responseIdentity,
-          model,
-          status: "failed",
-          output: [],
-          error: {
+        const mappedResponse = createFailedResponse(
+          {
             code: mapped.error.type,
             message: mapped.error.message,
           },
-          usage: finalUsage,
-        });
+          finalUsage,
+        );
         rememberResponseSession();
         finalizeFailedResponse(mappedResponse);
         return;
       }
       rememberResponseSession();
-      finalizeFailedResponse(errorResponse);
+      finalizeFailedResponse(
+        createFailedResponse({ code: "api_error", message: "internal error" }, finalUsage),
+      );
     } finally {
       releaseAgentRootWork?.();
       // Existing provider terminals must not be replaced or emitted twice.

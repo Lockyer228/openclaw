@@ -417,13 +417,6 @@
   animation: fade-in 0.2s var(--ease-out);
 }
 
-.session-progress-card--rail {
-  flex: 0 0 auto;
-  margin: 10px 14px 0;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
-}
-
 .session-progress-card--board {
   padding: var(--space-3);
 }
@@ -534,13 +527,6 @@
   white-space: nowrap;
 }
 
-.session-progress-card__count {
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: var(--control-ui-text-xs);
-  font-variant-numeric: tabular-nums;
-}
-
 .session-progress-card__dismiss {
   width: 22px;
   min-width: 22px;
@@ -625,7 +611,8 @@
   color: var(--session-progress-neutral);
 }
 
-.session-progress-card__step--pending .session-progress-card__step-marker {
+.session-progress-card__step--pending .session-progress-card__step-marker,
+.session-progress-card__step--paused .session-progress-card__step-marker {
   color: var(--session-progress-neutral);
 }
 

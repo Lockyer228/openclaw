@@ -1328,6 +1328,7 @@ function runGeneratedPublisherScenario(
     existingPr?: boolean;
     expectFailure?: boolean;
     failGeneratedPush?: boolean;
+    invalidationPaths?: string;
     mergeGeneratedPush?: boolean;
     noGeneratedChange?: boolean;
     overlapPolicy?: string;
@@ -1495,7 +1496,7 @@ ${actionRun}`;
         FAKE_STALE_HEAD_ONCE: stalePrHeadOnce,
         FAKE_STALE_PR_VIEW_HEAD_ONCE: stalePrViewHeadOnce,
         GENERATED_PATHS: "generated",
-        INVALIDATION_PATHS: "source",
+        INVALIDATION_PATHS: options.invalidationPaths ?? "source",
         OVERLAP_POLICY: options.overlapPolicy ?? "defer",
         CONTENTS_TOKEN: "contents-token",
         GH_TOKEN: "test-token",
@@ -2394,6 +2395,11 @@ NODE
     expect(actionPublishStep.env.CONTENTS_TOKEN).toBe("${{ steps.tokens.outputs.contents-token }}");
     expect(actionPublishStep.env.GH_TOKEN).toBe("${{ steps.tokens.outputs.pull-request-token }}");
     expect(actionPublishStep.env.INVALIDATION_PATHS).toBe("${{ inputs.invalidation-paths }}");
+    expect(publishAction.inputs["invalidation-paths"]).toEqual({
+      description: "Newline-delimited generator input paths that make an older run stale.",
+      required: false,
+      default: "",
+    });
     expect(publishAction.inputs["working-directory"]).toEqual({
       description: "Repository root containing the generated files.",
       required: false,
@@ -2738,6 +2744,21 @@ NODE
         "Deferred stale generated output because generator inputs changed on main.",
       );
       expect(result.summary).toContain("Neutralized stale generated pull request");
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "publishes after unrelated source changes when input invalidation is disabled",
+    () => {
+      const result = runGeneratedPublisherScenario(null, {
+        invalidationPaths: "",
+        overlapPolicy: "fail",
+        updateSource: true,
+      });
+
+      expect(result.branchExists).toBe(true);
+      expect(result.generatedA).toBe("desired-a");
+      expect(result.publishOutput).not.toContain("Refusing stale generated output");
     },
   );
 
@@ -3665,6 +3686,27 @@ NODE
         }),
         jobName,
       ).toBe(hostedTimeout);
+    }
+
+    const macosSwift = workflow.jobs["macos-swift"];
+    for (const [authorAssociation, runner, timeout] of [
+      ["NONE", "macos-26", 30],
+      ["FIRST_TIME_CONTRIBUTOR", "macos-26", 30],
+      ["CONTRIBUTOR", "blacksmith-12vcpu-macos-26", 20],
+    ] as const) {
+      const forkContext = {
+        ...canonicalPullRequest,
+        authorAssociation,
+        headRepository: "contributor/openclaw",
+      };
+      expect(
+        evaluateWorkflowExpression(macosSwift["runs-on"], forkContext),
+        authorAssociation,
+      ).toBe(runner);
+      expect(
+        evaluateWorkflowExpression(macosSwift["timeout-minutes"], forkContext),
+        authorAssociation,
+      ).toBe(timeout);
     }
   });
 
@@ -7527,6 +7569,9 @@ printf '%s\n' "\${CURL_SUCCESS_IP:-203.0.113.7}"
 
   it("splits native source verification from generated locale parity", () => {
     const workflow = readCiWorkflow();
+    const manifestStep = workflow.jobs.preflight.steps.find(
+      (step: WorkflowStep) => step.name === "Build CI manifest",
+    );
     const localeJob = workflow.jobs["native-i18n"];
     const sourceStep = localeJob.steps.find(
       (step: WorkflowStep) => step.name === "Verify native app i18n source",
@@ -7535,11 +7580,19 @@ printf '%s\n' "\${CURL_SUCCESS_IP:-203.0.113.7}"
       (step: WorkflowStep) => step.name === "Check native app generated locale parity",
     );
     const packageScripts = JSON.parse(readFileSync("package.json", "utf8")).scripts;
+    const fullReleaseSource = readFileSync(".github/workflows/full-release-validation.yml", "utf8");
+    const fullReleaseCiCase = expectDefined(
+      fullReleaseSource.match(/case "\$CHILD_WORKFLOW_KIND" in\n\s+ci\)([\s\S]*?)\n\s+;;/u)?.[1],
+      "Full Release CI dispatch case",
+    );
 
     expect(packageScripts["native:i18n:baseline"]).toContain("baseline --write");
     expect(packageScripts["native:i18n:verify"]).toContain(" verify");
-    expect(workflow.jobs.preflight.outputs.strict_native_i18n).toContain(
-      "steps.changed_scope.outputs.strict_native_i18n",
+    expect(workflow.jobs.preflight.outputs.strict_native_i18n).toBe(
+      "${{ github.event_name == 'workflow_dispatch' && !inputs.release_gate && 'true' || steps.changed_scope.outputs.strict_native_i18n }}",
+    );
+    expect(manifestStep.env.OPENCLAW_CI_RUN_NATIVE_I18N).toBe(
+      "${{ github.event_name == 'workflow_dispatch' && 'true' || steps.changed_scope.outputs.run_native_i18n || 'false' }}",
     );
     expect(sourceStep.run).toContain("pnpm native:i18n:verify");
     expect(sourceStep.run).toContain("Historical release targets");
@@ -7547,6 +7600,11 @@ printf '%s\n' "\${CURL_SUCCESS_IP:-203.0.113.7}"
     expect(parityStep.run).toContain("pnpm native:i18n:check");
     expect(parityStep.run).not.toContain("pnpm android:i18n:check");
     expect(parityStep.run).not.toContain("pnpm apple:i18n:check");
+    expect(fullReleaseCiCase).toContain(
+      'args=(-f target_ref="$TARGET_SHA" -f include_android=true -f dispatch_id="$dispatch_id")',
+    );
+    expect(fullReleaseCiCase).toContain('dispatch_child ci.yml "$dispatch_run_name"');
+    expect(fullReleaseCiCase).not.toContain("release_gate");
   });
 
   it("runs built runtime verifiers inside the artifact-check wave", () => {
@@ -8991,6 +9049,7 @@ printf '%s\n' "\${CURL_SUCCESS_IP:-203.0.113.7}"
 
     expect(publishPrJob.needs).toEqual(["validate_selected_ref", "publisher_preflight", "publish"]);
     expect(publishPrJob["runs-on"]).toBe("ubuntu-24.04");
+    expect(publishPrJob.permissions).toEqual({ actions: "read", contents: "read" });
     for (const fragment of [
       "needs.publisher_preflight.result == 'success'",
       "needs.publish.result == 'success'",
@@ -9047,17 +9106,12 @@ printf '%s\n' "\${CURL_SUCCESS_IP:-203.0.113.7}"
       "working-directory": "selected",
       "commit-message": "docs: update maturity scorecard",
       "pr-title": "docs: update maturity scorecard",
+      "invalidation-paths": "",
       "overlap-policy": "fail",
     });
     expect(openDocsPrStep.with["generated-paths"].trim().split("\n")).toEqual(
       MATURITY_GENERATED_PR_PATHS,
     );
-    expect(openDocsPrStep.with["invalidation-paths"].trim().split("\n")).toEqual([
-      ".",
-      ":(exclude)qa/maturity-scores.yaml",
-      ":(exclude)docs/maturity/scorecard.md",
-      ":(exclude)docs/maturity/taxonomy.md",
-    ]);
     for (const heading of [
       "## What Problem This Solves",
       "## Why This Change Was Made",
