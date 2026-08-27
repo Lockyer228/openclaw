@@ -1324,6 +1324,8 @@ export async function noteStateIntegrity(
 
     const sqliteStorePath = resolveSqliteTargetFromSessionStorePath(absoluteStorePath, {
       agentId,
+      defaultAgentId: compatibilityAgentId,
+      env,
     }).path;
     // A successful SQLite import archives sessions.json. Its continued presence
     // is therefore the explicit signal that pre-import rows still need inspection.
@@ -1375,7 +1377,7 @@ export async function noteStateIntegrity(
       }
     };
     const sqliteEntryCount = scanDoctorSessionEntriesStrict(
-      { agentId, storePath: absoluteStorePath },
+      { agentId, storePath: sqliteStorePath },
       ({ entry, sessionKey }) => {
         sqliteSessionKeys.add(sessionKey);
         const order = legacyOrder.get(sessionKey) ?? legacyEntries.length + sqliteNewKeyIndex++;
@@ -1396,7 +1398,7 @@ export async function noteStateIntegrity(
     }
     const sessionPathOpts = resolveSessionFilePathOptions({ agentId, storePath });
     await noteMainSessionRecoveryIntegrity({
-      storePath: absoluteStorePath,
+      storePath: sqliteStorePath,
       wedged: mainRecoveryWedged,
       warnings,
       changes,
@@ -1458,8 +1460,9 @@ export async function noteStateIntegrity(
             .filter((key) => sqliteSessionKeys.has(key));
           for (const sessionKeys of iterateDoctorSessionKeyBatches(sqliteKeys)) {
             repaired += await applySessionEntryReplacements<number>({
+              agentId,
               sessionKeys,
-              storePath: absoluteStorePath,
+              storePath: sqliteStorePath,
               update: (currentEntries) => {
                 const replacements = currentEntries.flatMap(({ entry, sessionKey }) =>
                   clearWedgedSubagentRecoveryAbort(entry, repairedAt)

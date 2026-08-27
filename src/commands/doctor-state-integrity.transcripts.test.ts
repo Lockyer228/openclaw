@@ -267,6 +267,32 @@ describe("doctor transcript and heartbeat session repairs", () => {
     expect(text).not.toContain(" ls ");
   });
 
+  it("preserves a non-main compatibility owner for a fixed legacy store", async () => {
+    const storePath = path.join(tempHome, "fixed-store", "sessions.json");
+    const cfg: OpenClawConfig = {
+      agents: {
+        defaults: { sessionStore: { agentId: "ops" } },
+        entries: { main: {}, ops: {} },
+      },
+      session: { store: storePath },
+    };
+    writeSessionStore(
+      cfg,
+      {
+        "agent:ops:missing": {
+          sessionId: "missing-ops",
+          updatedAt: Date.now(),
+        },
+      },
+      "ops",
+    );
+    const text = await runStateIntegrityText(cfg);
+    const sqliteStorePath = path.join(path.dirname(storePath), "openclaw-agent.sqlite");
+    expect(text).toContain("1/1 recent sessions are missing transcripts");
+    expect(text).toContain(sqliteStorePath);
+    expect(text).not.toContain(path.join(path.dirname(storePath), "openclaw-agent.ops.sqlite"));
+  });
+
   it("moves a heartbeat-poisoned main session and clears stale TUI restore pointers", async () => {
     const cfg: OpenClawConfig = {};
     setupSessionState(cfg, process.env, tempHome);
