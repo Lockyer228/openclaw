@@ -1274,15 +1274,27 @@ describe("provider auth hot reload path ownership", () => {
 
 describe("gateway hot reload model state", () => {
   it.each([
-    { reconciliationResult: "converged" as const, reviewAborted: true, publishes: true },
+    {
+      reconciliationResult: "converged" as const,
+      becomesStale: false,
+      reviewAborted: true,
+      publishes: true,
+    },
     {
       reconciliationResult: "retry-scheduled" as const,
+      becomesStale: false,
+      reviewAborted: false,
+      publishes: false,
+    },
+    {
+      reconciliationResult: "converged" as const,
+      becomesStale: true,
       reviewAborted: false,
       publishes: false,
     },
   ])(
-    "keeps active skill review cancellation aligned with $reconciliationResult reconciliation",
-    async ({ reconciliationResult, reviewAborted, publishes }) => {
+    "keeps active skill review cancellation aligned with $reconciliationResult reconciliation (stale: $becomesStale)",
+    async ({ reconciliationResult, becomesStale, reviewAborted, publishes }) => {
       const fixtureDir = autoCleanupTempDirs.make("openclaw-skill-review-reload-");
       const outputPath = path.join(fixtureDir, "review-output.md");
       const reviewStarted = createDeferred<AbortSignal>();
@@ -1346,24 +1358,26 @@ describe("gateway hot reload model state", () => {
           getState: () => state,
           setState,
         });
+        let current = true;
 
         const reload = applyHotReload(
           buildGatewayReloadPlan(["skills.workshop.autonomous.mode"]),
           nextConfig,
           {
             sourceConfig: previousConfig,
-            isCurrent: () => true,
+            isCurrent: () => current,
             publish: async (commit) => await commit(),
           },
         );
 
         await waitForFast(() => expect(reconcileHeartbeatJobs).toHaveBeenCalledWith(nextConfig));
         expect(abortSignal.aborted).toBe(false);
+        current = !becomesStale;
         releaseReconciliation.resolve();
         if (publishes) {
           await expect(reload).resolves.toBe("applied");
         } else {
-          await expect(reload).rejects.toThrow("cron monitor");
+          await expect(reload).rejects.toThrow(becomesStale ? "superseded" : "cron monitor");
         }
         expect(abortSignal.aborted).toBe(reviewAborted);
         expect(setState).toHaveBeenCalledTimes(publishes ? 1 : 0);

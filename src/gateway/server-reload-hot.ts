@@ -28,6 +28,7 @@ import {
   startGatewayChannelFromActiveRegistry,
 } from "./server-reload-channel-restart.js";
 import {
+  assertReloadPublicationCurrent,
   GatewayHotReloadCancelledError,
   GatewayHotReloadRecoveryError,
   isCurrentGatewayReloadGeneration,
@@ -192,7 +193,9 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
         if (plan.restartHeartbeat || plan.reconcileSkillReviewJobs) {
           // Runtime publication promises that durable monitor rows reflect this config.
           // A retrying or superseded pass leaves the previous generation authoritative.
-          if ((await nextState.cronState.reconcileHeartbeatJobs(nextConfig)) !== "converged") {
+          const reconciliation = await nextState.cronState.reconcileHeartbeatJobs(nextConfig);
+          assertReloadPublicationCurrent(publication?.isCurrent() ?? true, isRestartRetryStopped());
+          if (reconciliation !== "converged") {
             throw new GatewayHotReloadRecoveryError("cron monitor");
           }
         }

@@ -122,6 +122,8 @@ import { loadGatewaySessionRow } from "./session-utils.js";
 
 export type GatewayHeartbeatReconciliationResult = "converged" | "retry-scheduled" | "superseded";
 
+class GatewayHeartbeatReconciliationSupersededError extends Error {}
+
 export type GatewayCronState = {
   cron: GatewayCronServiceContract;
   storePath: string;
@@ -1548,6 +1550,11 @@ export function buildGatewayCronService(params: {
       heartbeatRetryTimer = undefined;
     }
     const pass = async (): Promise<GatewayHeartbeatReconciliationResult> => {
+      const assertCurrent = () => {
+        if (epoch !== heartbeatReconcileEpoch) {
+          throw new GatewayHeartbeatReconciliationSupersededError();
+        }
+      };
       if (epoch !== heartbeatReconcileEpoch) {
         return "superseded";
       }
@@ -1555,13 +1562,21 @@ export function buildGatewayCronService(params: {
         cron,
         cfg: cfgOverride ?? getRuntimeConfig(),
         logger: cronLogger,
+        commitGuard: assertCurrent,
       });
+      if (epoch !== heartbeatReconcileEpoch) {
+        return "superseded";
+      }
       const { ok: skillReviewOk } = await reconcileSkillCollectionReviewJobs({
         cron,
         cfg: cfgOverride ?? getRuntimeConfig(),
         logger: cronLogger,
+        commitGuard: assertCurrent,
       });
-      if ((!heartbeatOk || !skillReviewOk) && epoch === heartbeatReconcileEpoch) {
+      if (epoch !== heartbeatReconcileEpoch) {
+        return "superseded";
+      }
+      if (!heartbeatOk || !skillReviewOk) {
         heartbeatRetryTimer = setTimeout(() => {
           heartbeatRetryTimer = undefined;
           void reconcileHeartbeatJobs(cfgOverride);
@@ -1570,7 +1585,12 @@ export function buildGatewayCronService(params: {
       }
       return heartbeatOk && skillReviewOk ? "converged" : "retry-scheduled";
     };
-    heartbeatReconcileTail = heartbeatReconcileTail.then(pass, pass);
+    heartbeatReconcileTail = heartbeatReconcileTail.then(pass, pass).catch((error: unknown) => {
+      if (error instanceof GatewayHeartbeatReconciliationSupersededError) {
+        return "superseded";
+      }
+      throw error;
+    });
     return heartbeatReconcileTail;
   };
   const startCron = cron.start.bind(cron);
