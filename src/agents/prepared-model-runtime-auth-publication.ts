@@ -18,15 +18,38 @@ type PreparedModelRuntimeAuthTransaction = {
   publicationQueued: boolean;
 };
 
+function partitionAuthMutationOwners(
+  mutations: readonly (readonly PreparedModelRuntimeOwner[])[],
+): PreparedModelRuntimeOwner[][] {
+  // Overlapping owner identities share one atomic failure boundary. Independent components
+  // retain FIFO order so one scoped credential failure cannot poison an unrelated owner.
+  const components: Set<PreparedModelRuntimeOwner>[] = [];
+  for (const invalidatedOwners of mutations) {
+    const target = new Set(invalidatedOwners);
+    let insertAt = components.length;
+    for (let index = components.length - 1; index >= 0; index -= 1) {
+      if (![...target].some((owner) => components[index]!.has(owner))) {
+        continue;
+      }
+      insertAt = index;
+      for (const owner of components[index]!) {
+        target.add(owner);
+      }
+      components.splice(index, 1);
+    }
+    components.splice(insertAt, 0, target);
+  }
+  return components.map((component) => Array.from(component));
+}
+
 export class PreparedModelRuntimeAuthPublicationOwner {
-  readonly #events: PreparedModelRuntimeAuthMutation[] = [];
+  readonly #events: (readonly PreparedModelRuntimeOwner[])[] = [];
   #transaction: PreparedModelRuntimeAuthTransaction | undefined;
 
   enqueue(
-    event: PreparedModelRuntimeAuthMutation,
     invalidatedOwners: readonly PreparedModelRuntimeOwner[],
   ): PreparedModelRuntimeAuthTransaction {
-    this.#events.push(event);
+    this.#events.push([...invalidatedOwners]);
     const transaction =
       this.#transaction ??
       (this.#transaction = {
@@ -86,50 +109,8 @@ export class PreparedModelRuntimeAuthPublicationOwner {
   resolve(
     transaction: PreparedModelRuntimeAuthTransaction,
     owners: Map<string, PreparedModelRuntimeOwner>,
-    entries?: readonly { owner: PreparedModelRuntimeOwner }[],
-    publishOwners?: (owners: readonly PreparedModelRuntimeOwner[]) => void,
   ): boolean {
     if (this.#transaction !== transaction) {
-      return false;
-    }
-    if (entries) {
-      if (transaction.adoptedBy) {
-        return false;
-      }
-      const completed = entries.flatMap(({ owner }) => {
-        const gate = transaction.ownerGates.get(owner);
-        return gate &&
-          owner.pending === gate.promise &&
-          owners.get(ownerKey(owner.input)) === owner &&
-          owner.snapshot &&
-          !owner.needsRefresh
-          ? [{ owner, gate, snapshot: owner.snapshot }]
-          : [];
-      });
-      if (completed.length === 0 || !publishOwners) {
-        return false;
-      }
-      // Publish the replacement projection before releasing exact-gate waiters. If projection
-      // construction fails, restoring pending keeps the failed generation unavailable.
-      for (const { owner } of completed) {
-        owner.pending = undefined;
-      }
-      try {
-        publishOwners(completed.map(({ owner }) => owner));
-      } catch (error) {
-        for (const { owner, gate } of completed) {
-          if (transaction.ownerGates.get(owner) === gate && owner.pending === undefined) {
-            owner.pending = gate.promise;
-          }
-        }
-        throw error;
-      }
-      for (const { owner, gate, snapshot } of completed) {
-        if (transaction.ownerGates.get(owner) === gate) {
-          transaction.ownerGates.delete(owner);
-          gate.resolve(snapshot);
-        }
-      }
       return false;
     }
     if (transaction.adoptedBy) {
@@ -157,6 +138,57 @@ export class PreparedModelRuntimeAuthPublicationOwner {
     return true;
   }
 
+  settleComponent(
+    transaction: PreparedModelRuntimeAuthTransaction,
+    componentOwners: readonly PreparedModelRuntimeOwner[],
+    owners: Map<string, PreparedModelRuntimeOwner>,
+    publishOwners: (owners: readonly PreparedModelRuntimeOwner[]) => void,
+  ): void {
+    if (this.#transaction !== transaction || transaction.adoptedBy) {
+      return;
+    }
+    const queuedOwners = new Set(this.#events.flat());
+    const unsettled = componentOwners.flatMap((owner) => {
+      const gate = transaction.ownerGates.get(owner);
+      return gate && !queuedOwners.has(owner) ? [{ owner, gate }] : [];
+    });
+    const completed = unsettled.flatMap(({ owner, gate }) =>
+      owner.pending === gate.promise &&
+      owners.get(ownerKey(owner.input)) === owner &&
+      owner.snapshot &&
+      !owner.needsRefresh
+        ? [{ owner, gate, snapshot: owner.snapshot }]
+        : [],
+    );
+    // Dispatch projection must become visible before exact-gate waiters resume.
+    for (const { owner } of completed) {
+      owner.pending = undefined;
+    }
+    try {
+      if (completed.length > 0) {
+        publishOwners(completed.map(({ owner }) => owner));
+      }
+    } catch (error) {
+      for (const { owner, gate } of completed) {
+        if (transaction.ownerGates.get(owner) === gate && owner.pending === undefined) {
+          owner.pending = gate.promise;
+        }
+      }
+      throw error;
+    }
+    for (const { owner, gate, snapshot } of completed) {
+      transaction.ownerGates.delete(owner);
+      gate.resolve(snapshot);
+    }
+    this.rejectComponentOwners(
+      transaction,
+      componentOwners,
+      new PreparedModelRuntimePublicationSupersededError(
+        "prepared model runtime auth publication owner was superseded",
+      ),
+    );
+  }
+
   reject(transaction: PreparedModelRuntimeAuthTransaction, error: Error): void {
     if (this.#transaction === transaction) {
       this.#transaction = undefined;
@@ -181,56 +213,34 @@ export class PreparedModelRuntimeAuthPublicationOwner {
         input: PreparedModelRuntimeOwner["input"];
       }>,
     ) => Promise<void>;
-    publishOwners?: (owners: readonly PreparedModelRuntimeOwner[]) => void;
+    publishOwners: (owners: readonly PreparedModelRuntimeOwner[]) => void;
     commit?: () => void;
     onOwnerFailure?: (error: unknown) => void;
   }): Promise<void> {
     while (this.#events.length > 0) {
-      const events = this.#events.splice(0);
-      const entries = [...params.owners.values()]
-        .filter((owner) =>
-          events.some(
-            (event) =>
-              event.affectsInheritedStores ||
-              owner.input.agentDir === event.agentDir ||
-              owner.input.inheritedAuthDir === event.agentDir,
-          ),
-        )
-        .map((owner) => ({ owner, input: owner.input }));
-      try {
-        await params.publish(entries);
-      } catch (error) {
-        if (this.#transaction?.adoptedBy) {
-          // The replacement transaction exclusively settles adopted gates from its own result.
-          throw error;
-        }
-        const failedOwners = entries.filter(
-          ({ owner }) =>
-            !this.#events.some(
-              (event) =>
-                event.affectsInheritedStores ||
-                owner.input.agentDir === event.agentDir ||
-                owner.input.inheritedAuthDir === event.agentDir,
-            ),
+      const components = partitionAuthMutationOwners(this.#events.splice(0));
+      for (const componentOwners of components) {
+        const entries = componentOwners.flatMap((owner) =>
+          params.owners.get(ownerKey(owner.input)) === owner ? [{ owner, input: owner.input }] : [],
         );
-        for (const { owner } of failedOwners) {
-          const gate = this.#transaction?.ownerGates.get(owner);
-          if (gate) {
-            if (owner.pending === gate.promise) {
-              owner.pending = undefined;
-            }
-            this.#transaction?.ownerGates.delete(owner);
-            gate.reject(error);
+        try {
+          if (entries.length > 0) {
+            await params.publish(entries);
+          }
+          const transaction = this.#transaction;
+          if (transaction) {
+            this.settleComponent(transaction, componentOwners, params.owners, params.publishOwners);
+          }
+        } catch (error) {
+          if (this.#transaction?.adoptedBy) {
+            // The replacement transaction exclusively settles adopted gates from its own result.
+            throw error;
+          }
+          const transaction = this.#transaction;
+          if (transaction && this.rejectComponentOwners(transaction, componentOwners, error) > 0) {
+            params.onOwnerFailure?.(error);
           }
         }
-        if (failedOwners.length > 0) {
-          params.onOwnerFailure?.(error);
-        }
-        continue;
-      }
-      const transaction = this.#transaction;
-      if (transaction) {
-        this.resolve(transaction, params.owners, entries, params.publishOwners);
       }
     }
     // The queue check and commit share one synchronous section so no mutation can be orphaned.
@@ -250,5 +260,30 @@ export class PreparedModelRuntimeAuthPublicationOwner {
         owner.pending = undefined;
       }
     }
+  }
+
+  private rejectComponentOwners(
+    transaction: PreparedModelRuntimeAuthTransaction,
+    componentOwners: readonly PreparedModelRuntimeOwner[],
+    error: unknown,
+  ): number {
+    const queuedOwners = new Set(this.#events.flat());
+    let rejected = 0;
+    for (const owner of componentOwners) {
+      if (queuedOwners.has(owner)) {
+        continue;
+      }
+      const gate = transaction.ownerGates.get(owner);
+      if (!gate) {
+        continue;
+      }
+      if (owner.pending === gate.promise) {
+        owner.pending = undefined;
+      }
+      transaction.ownerGates.delete(owner);
+      gate.reject(error);
+      rejected += 1;
+    }
+    return rejected;
   }
 }

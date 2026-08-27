@@ -275,53 +275,129 @@ describe("prepared model runtime reload auth adoption", () => {
     expect(mocks.warn).not.toHaveBeenCalled();
   });
 
-  it("publishes an independent queued owner after another auth build fails", async () => {
+  it.each([
+    { failedAgentId: "worker", successfulAgentId: "research" },
+    { failedAgentId: "research", successfulAgentId: "worker" },
+  ])(
+    "isolates simultaneous scoped auth failure for $failedAgentId",
+    async ({ failedAgentId, successfulAgentId }) => {
+      mocks.configuredAgentIds = ["default", "worker", "research"];
+      const config = {};
+      await refreshPreparedModelRuntimeSnapshots(config, { gatewayLifecycle: true });
+      const agentDirs = {
+        research: "/tmp/configured-research",
+        worker: "/tmp/configured-worker",
+      } as const;
+      const builds = {
+        research: createDeferred<{ agentDir: string; wrote: false }>(),
+        worker: createDeferred<{ agentDir: string; wrote: false }>(),
+      };
+      const refreshError = new Error(`${failedAgentId} auth build failed`);
+      mocks.ensureOpenClawModelsJson.mockImplementation(async (_config, agentDir) => {
+        const agentId =
+          agentDir === agentDirs.worker
+            ? "worker"
+            : agentDir === agentDirs.research
+              ? "research"
+              : undefined;
+        return agentId
+          ? await builds[agentId].promise
+          : { agentDir: String(agentDir), wrote: false };
+      });
+
+      mocks.mutationListener?.({
+        agentDir: agentDirs.worker,
+        affectsInheritedStores: false,
+      });
+      mocks.mutationListener?.({
+        agentDir: agentDirs.research,
+        affectsInheritedStores: false,
+      });
+      const dispatches = {
+        research: loadPublishedGatewayReplyDispatchRuntime({ agentId: "research" }),
+        worker: loadPublishedGatewayReplyDispatchRuntime({ agentId: "worker" }),
+      };
+      void dispatches.research.catch(() => undefined);
+      void dispatches.worker.catch(() => undefined);
+      await vi.waitFor(() =>
+        expect(mocks.ensureOpenClawModelsJson.mock.calls.length).toBeGreaterThanOrEqual(4),
+      );
+      if (failedAgentId === "worker") {
+        builds.worker.reject(refreshError);
+      } else {
+        builds.worker.resolve({ agentDir: agentDirs.worker, wrote: false });
+      }
+      await vi.waitFor(() =>
+        expect(mocks.ensureOpenClawModelsJson.mock.calls.length).toBeGreaterThanOrEqual(5),
+      );
+      if (failedAgentId === "research") {
+        builds.research.reject(refreshError);
+      } else {
+        builds.research.resolve({ agentDir: agentDirs.research, wrote: false });
+      }
+
+      await expect(dispatches[failedAgentId]).rejects.toBe(refreshError);
+      await expect(dispatches[successfulAgentId]).resolves.toMatchObject({
+        agentId: successfulAgentId,
+        agentDir: agentDirs[successfulAgentId],
+      });
+      await expect(
+        loadPublishedGatewayReplyDispatchRuntime({ agentId: failedAgentId }),
+      ).rejects.toThrow(
+        `prepared reply dispatch runtime owner was not published for ${failedAgentId}`,
+      );
+      expect(mocks.warn).toHaveBeenCalledOnce();
+      expect(mocks.warn).toHaveBeenCalledWith(expect.stringContaining(refreshError.message));
+    },
+  );
+
+  it("keeps transitively overlapping inherited auth mutations atomic", async () => {
     mocks.configuredAgentIds = ["default", "worker", "research"];
-    const config = {};
-    await refreshPreparedModelRuntimeSnapshots(config, { gatewayLifecycle: true });
-    const workerBuild = createDeferred<{ agentDir: string; wrote: false }>();
-    const researchBuild = createDeferred<{ agentDir: string; wrote: false }>();
-    const workerError = new Error("worker auth build failed");
+    await refreshPreparedModelRuntimeSnapshots({}, { gatewayLifecycle: true });
+    const agentDirs = {
+      default: "/tmp/unused-agent",
+      research: "/tmp/configured-research",
+      worker: "/tmp/configured-worker",
+    } as const;
+    const builds = {
+      default: createDeferred<{ agentDir: string; wrote: false }>(),
+      research: createDeferred<{ agentDir: string; wrote: false }>(),
+      worker: createDeferred<{ agentDir: string; wrote: false }>(),
+    };
+    const refreshError = new Error("inherited research auth build failed");
     mocks.ensureOpenClawModelsJson.mockImplementation(async (_config, agentDir) => {
-      if (agentDir === "/tmp/configured-worker") {
-        return await workerBuild.promise;
-      }
-      if (agentDir === "/tmp/configured-research") {
-        return await researchBuild.promise;
-      }
-      return { agentDir: String(agentDir), wrote: false };
+      const entry = Object.entries(agentDirs).find(
+        ([, configuredDir]) => configuredDir === agentDir,
+      );
+      return entry
+        ? await builds[entry[0] as keyof typeof builds].promise
+        : { agentDir: String(agentDir), wrote: false };
     });
 
-    mocks.mutationListener?.({
-      agentDir: "/tmp/configured-worker",
-      affectsInheritedStores: false,
-    });
-    await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(4));
-    const workerDispatch = loadPublishedGatewayReplyDispatchRuntime({ agentId: "worker" });
-    void workerDispatch.catch(() => undefined);
-    mocks.mutationListener?.({
-      agentDir: "/tmp/configured-research",
-      affectsInheritedStores: false,
-    });
-    const researchDispatch = loadPublishedGatewayReplyDispatchRuntime({ agentId: "research" });
-    void researchDispatch.catch(() => undefined);
-    workerBuild.reject(workerError);
-    await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(5));
-    await expect(workerDispatch).rejects.toBe(workerError);
-    await expect(
-      Promise.race([researchDispatch.then(() => "settled"), Promise.resolve("pending")]),
-    ).resolves.toBe("pending");
-
-    researchBuild.resolve({ agentDir: "/tmp/configured-research", wrote: false });
-    await expect(researchDispatch).resolves.toMatchObject({
-      agentId: "research",
-      agentDir: "/tmp/configured-research",
-    });
-    await expect(loadPublishedGatewayReplyDispatchRuntime({ agentId: "worker" })).rejects.toThrow(
-      "prepared reply dispatch runtime owner was not published for worker",
+    mocks.mutationListener?.({ agentDir: agentDirs.worker, affectsInheritedStores: false });
+    mocks.mutationListener?.({ agentDir: agentDirs.research, affectsInheritedStores: false });
+    mocks.mutationListener?.({ affectsInheritedStores: true });
+    const dispatches = Object.fromEntries(
+      Object.keys(agentDirs).map((agentId) => [
+        agentId,
+        loadPublishedGatewayReplyDispatchRuntime({ agentId }),
+      ]),
+    ) as Record<keyof typeof agentDirs, Promise<unknown>>;
+    for (const dispatch of Object.values(dispatches)) {
+      void dispatch.catch(() => undefined);
+    }
+    builds.default.resolve({ agentDir: agentDirs.default, wrote: false });
+    builds.worker.resolve({ agentDir: agentDirs.worker, wrote: false });
+    await vi.waitFor(() =>
+      expect(mocks.ensureOpenClawModelsJson.mock.calls.length).toBeGreaterThanOrEqual(6),
     );
+
+    builds.research.reject(refreshError);
+
+    await expect(dispatches.default).rejects.toBe(refreshError);
+    await expect(dispatches.worker).rejects.toBe(refreshError);
+    await expect(dispatches.research).rejects.toBe(refreshError);
     expect(mocks.warn).toHaveBeenCalledOnce();
-    expect(mocks.warn).toHaveBeenCalledWith(expect.stringContaining(workerError.message));
   });
 
   it("commits a successful owner when the final independent owner fails", async () => {
@@ -381,11 +457,10 @@ describe("prepared model runtime reload auth adoption", () => {
     unregister();
   });
 
-  it("rejects the exact gate when reply projection replacement fails", async () => {
-    mocks.configuredAgentIds = ["default"];
+  it("isolates reply projection replacement failure to its component", async () => {
+    mocks.configuredAgentIds = ["default", "worker", "research"];
     const config = {};
     await refreshPreparedModelRuntimeSnapshots(config, { gatewayLifecycle: true });
-    const authBuild = createDeferred<{ agentDir: string; wrote: false }>();
     const projectionError = new Error("reply projection replacement failed");
     const events: string[] = [];
     const unregister = registerPreparedModelRuntimePublicationListener((event) => {
@@ -396,17 +471,27 @@ describe("prepared model runtime reload auth adoption", () => {
       .mockImplementationOnce(() => {
         throw projectionError;
       });
-    mocks.ensureOpenClawModelsJson.mockImplementationOnce(async () => await authBuild.promise);
 
-    mocks.mutationListener?.({ agentDir: "/tmp/unused-agent", affectsInheritedStores: false });
-    await vi.waitFor(() => expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(2));
-    const dispatch = loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" });
-    void dispatch.catch(() => undefined);
-    authBuild.resolve({ agentDir: "/tmp/unused-agent", wrote: false });
+    mocks.mutationListener?.({
+      agentDir: "/tmp/configured-worker",
+      affectsInheritedStores: false,
+    });
+    mocks.mutationListener?.({
+      agentDir: "/tmp/configured-research",
+      affectsInheritedStores: false,
+    });
+    const workerDispatch = loadPublishedGatewayReplyDispatchRuntime({ agentId: "worker" });
+    const researchDispatch = loadPublishedGatewayReplyDispatchRuntime({ agentId: "research" });
+    void workerDispatch.catch(() => undefined);
+    void researchDispatch.catch(() => undefined);
 
-    await expect(dispatch).rejects.toBe(projectionError);
-    await expect(loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" })).rejects.toThrow(
-      "prepared reply dispatch runtime owner was not published for default",
+    await expect(workerDispatch).rejects.toBe(projectionError);
+    await expect(researchDispatch).resolves.toMatchObject({
+      agentId: "research",
+      agentDir: "/tmp/configured-research",
+    });
+    await expect(loadPublishedGatewayReplyDispatchRuntime({ agentId: "worker" })).rejects.toThrow(
+      "prepared reply dispatch runtime owner was not published for worker",
     );
     expect(events.filter((phase) => phase === "failed")).toHaveLength(1);
     replaceSpy.mockRestore();
