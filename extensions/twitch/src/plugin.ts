@@ -21,6 +21,7 @@ import {
   createPairingPrefixStripper,
 } from "openclaw/plugin-sdk/channel-pairing";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 import { buildPassiveProbedChannelStatusSummary } from "openclaw/plugin-sdk/extension-shared";
 import {
   createComputedAccountStatusAdapter,
@@ -185,6 +186,11 @@ export const twitchPlugin: ChannelPlugin<ResolvedTwitchAccount> =
         startAccount: async (ctx): Promise<void> => {
           const account = ctx.account;
           const accountId = ctx.accountId;
+          // SAFETY: Gateway startup supplies the full registered runtime behind its context-only public type.
+          const channelRuntime = ctx.channelRuntime as PluginRuntime["channel"] | undefined;
+          if (!channelRuntime?.inbound?.buildContext) {
+            throw new Error("Twitch requires its registered channel runtime context builder");
+          }
           const statusSink = createAccountStatusSink({
             accountId,
             setStatus: ctx.setStatus,
@@ -211,6 +217,7 @@ export const twitchPlugin: ChannelPlugin<ResolvedTwitchAccount> =
                 return monitorTwitchProvider({
                   account,
                   accountId,
+                  channelRuntime,
                   config: ctx.cfg,
                   runtime: ctx.runtime,
                   abortSignal: ctx.abortSignal,
