@@ -549,7 +549,7 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
             throw err;
           }
           scheduleRecoveryRestart("plugin runtime reload", err);
-          return "restart-required";
+          return "applied-restart-required";
         }
         if (pluginReloadResult.cancelled) {
           pluginReloadAborted = true;
@@ -602,7 +602,7 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
         throw err;
       }
       scheduleRecoveryRestart("runtime commit", err);
-      return "restart-required";
+      return "applied-restart-required";
     }
 
     try {
@@ -614,7 +614,7 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
       });
     } catch (err) {
       scheduleRecoveryRestart("prepared model runtime reload", err);
-      return "restart-required";
+      return "applied-restart-required";
     }
 
     if (plan.restartHealthMonitor) {
@@ -713,7 +713,7 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
     } else if (plan.noopPaths.length > 0) {
       params.logReload.info(`config change applied (dynamic reads: ${plan.noopPaths.join(", ")})`);
     }
-    return recoveryRestartScheduled ? "restart-required" : "applied";
+    return recoveryRestartScheduled ? "applied-restart-required" : "applied";
   };
 
   return {

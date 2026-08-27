@@ -2,7 +2,7 @@ import { createDeferredCore } from "../shared/deferred.js";
 
 export type RuntimeConfigWriteApplicationStatus =
   | "applied"
-  | "restart-required"
+  | "applied-restart-required"
   | "superseded"
   | "failed"
   | "stopped"

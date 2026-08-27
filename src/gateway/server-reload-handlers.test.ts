@@ -1787,7 +1787,7 @@ describe("gateway hot reload model state", () => {
 
       await expect(
         applyHotReload(createCronRestartPlan(), { cron: { enabled: true } }),
-      ).resolves.toBe("restart-required");
+      ).resolves.toBe("applied-restart-required");
 
       expect(setState).toHaveBeenCalledOnce();
       await waitForFast(() => expect(signalSpy).toHaveBeenCalledOnce());
@@ -1865,7 +1865,7 @@ describe("gateway hot reload model state", () => {
             isCurrent: () => true,
           },
         ),
-      ).resolves.toBe("restart-required");
+      ).resolves.toBe("applied-restart-required");
 
       expect(publish).toHaveBeenCalledOnce();
       expect(setState).toHaveBeenCalledOnce();
@@ -3812,7 +3812,7 @@ describe("gateway channel hot reload handlers", () => {
       await withChannelReloadsEnabled(async () => {
         await expect(
           applyHotReload(createChannelReloadPlan(["telegram", "discord"]), {}),
-        ).resolves.toBe("restart-required");
+        ).resolves.toBe("applied-restart-required");
       });
       expect(signalSpy).toHaveBeenCalledOnce();
     });
@@ -3877,7 +3877,7 @@ describe("gateway Gmail hot reload handlers", () => {
 
       await expect(
         applyHotReload(createGmailReloadPlan(), createGmailConfig("next@example.com")),
-      ).resolves.toBe("restart-required");
+      ).resolves.toBe("applied-restart-required");
 
       expect(stopPostReadySidecars).toHaveBeenCalledOnce();
       expect(setState).toHaveBeenCalledOnce();
@@ -5823,7 +5823,7 @@ describe("gateway plugin hot reload handlers", () => {
             isCurrent: () => true,
           },
         ),
-      ).resolves.toBe("restart-required");
+      ).resolves.toBe("applied-restart-required");
 
       expect(handlers.setState).toHaveBeenCalledTimes(1);
       expect(logReload.warn).toHaveBeenCalledWith(
@@ -5854,7 +5854,7 @@ describe("gateway plugin hot reload handlers", () => {
           { plugins: { enabled: true } },
           { sourceConfig: { plugins: { enabled: true } }, publish, isCurrent: () => true },
         ),
-      ).resolves.toBe("restart-required");
+      ).resolves.toBe("applied-restart-required");
 
       expect(publish).toHaveBeenCalledOnce();
       expect(handlers.setState).toHaveBeenCalledTimes(1);

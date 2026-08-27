@@ -8,4 +8,4 @@
 // can detect silent degradation instead of assuming reloads still fire.
 export type GatewayHotReloadStatus = "active" | "disabled";
 
-export type GatewayHotReloadApplicationStatus = "applied" | "restart-required";
+export type GatewayHotReloadApplicationStatus = "applied" | "applied-restart-required";

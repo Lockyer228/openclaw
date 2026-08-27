@@ -128,17 +128,20 @@ async function invokeConfigPatch(args: {
   return harness;
 }
 
-function startConfigPatch(args: { raw: unknown; baseHash?: string }) {
+function startConfigWrite(
+  method: "config.patch" | "config.apply",
+  args: { raw: unknown; baseHash?: string },
+) {
   const harness = createConfigHandlerHarness({
-    method: "config.patch",
+    method,
     params: {
       raw: JSON.stringify(args.raw),
       ...(args.baseHash ? { baseHash: args.baseHash } : {}),
     },
   });
   const handler = expectDefined(
-    configHandlers["config.patch"],
-    'configHandlers["config.patch"] test invariant',
+    configHandlers[method],
+    `configHandlers["${method}"] test invariant`,
   );
   return { harness, operation: handler(harness.options) };
 }
@@ -200,7 +203,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("config.patch application settlement", () => {
+describe("config application settlement", () => {
   it("does not acknowledge a persisted write before its runtime application", async () => {
     let settleApplication!: (status: "applied") => void;
     const application = new Promise<"applied">((resolve) => {
@@ -214,7 +217,7 @@ describe("config.patch application settlement", () => {
       queueFollowUp: vi.fn(),
     }));
 
-    const { harness, operation } = startConfigPatch({
+    const { harness, operation } = startConfigWrite("config.patch", {
       raw: { hooks: { enabled: true } },
       baseHash: "base-hash",
     });
@@ -233,7 +236,51 @@ describe("config.patch application settlement", () => {
     );
   });
 
-  it.each(["restart-required", "superseded", "failed", "unclaimed"] as const)(
+  it.each(["config.patch", "config.apply"] as const)(
+    "reports %s post-commit recovery without claiming the active config was unapplied",
+    async (method) => {
+      const queueFollowUp = vi.fn();
+      configWriteMocks.commitGatewayConfigWrite.mockResolvedValueOnce({
+        path: "/tmp/openclaw.json",
+        config: { hooks: { enabled: true } },
+        hash: "recovery-hash",
+        application: Promise.resolve("applied-restart-required"),
+        queueFollowUp,
+      });
+
+      const { harness, operation } = startConfigWrite(method, {
+        raw: { hooks: { enabled: true } },
+        baseHash: "base-hash",
+      });
+      await operation;
+
+      expect(harness.respond).toHaveBeenCalledWith(
+        false,
+        undefined,
+        expect.objectContaining({
+          code: "UNAVAILABLE",
+          message: expect.stringContaining("updated the active Gateway"),
+        }),
+      );
+      for (const excluded of ["was not applied", "reapply"]) {
+        expect(harness.respond).toHaveBeenCalledWith(
+          false,
+          undefined,
+          expect.objectContaining({ message: expect.not.stringContaining(excluded) }),
+        );
+      }
+      expect(harness.respond).toHaveBeenCalledWith(
+        false,
+        undefined,
+        expect.objectContaining({
+          message: expect.stringContaining("wait for the Gateway to restart"),
+        }),
+      );
+      expect(queueFollowUp).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["superseded", "failed", "stopped", "unclaimed"] as const)(
     "reports a persisted write whose runtime application was %s",
     async (outcome) => {
       const queueFollowUp = vi.fn();
@@ -245,7 +292,7 @@ describe("config.patch application settlement", () => {
         queueFollowUp,
       });
 
-      const { harness, operation } = startConfigPatch({
+      const { harness, operation } = startConfigWrite("config.patch", {
         raw: { hooks: { enabled: true } },
         baseHash: "base-hash",
       });
@@ -262,11 +309,7 @@ describe("config.patch application settlement", () => {
       expect(harness.respond).toHaveBeenCalledWith(
         false,
         undefined,
-        expect.objectContaining({
-          message: expect.stringContaining(
-            outcome === "restart-required" ? "Gateway is restarting" : "use config.apply",
-          ),
-        }),
+        expect.objectContaining({ message: expect.stringContaining("use config.apply") }),
       );
       expect(queueFollowUp).toHaveBeenCalledOnce();
     },

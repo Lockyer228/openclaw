@@ -870,7 +870,7 @@ function createReloaderHarness(
       nextConfig: OpenClawConfig,
       ownership: GatewayConfigReloadTransactionOwnership,
       sourceConfig: OpenClawConfig,
-    ) => Promise<"applied" | "restart-required">;
+    ) => Promise<"applied" | "applied-restart-required">;
     onRestart?: (
       plan: GatewayReloadPlan,
       nextConfig: OpenClawConfig,
@@ -1809,7 +1809,7 @@ describe("startGatewayConfigReloader", () => {
     const harness = createReloaderHarness(vi.fn(), {
       initialSnapshotRawHash: null,
       initialAuthoredConfig: {},
-      onHotReload: async () => "restart-required",
+      onHotReload: async () => "applied-restart-required",
     });
 
     harness.emitWrite(
@@ -1820,7 +1820,7 @@ describe("startGatewayConfigReloader", () => {
     );
     await vi.runAllTimersAsync();
 
-    await expect(application.result).resolves.toBe("restart-required");
+    await expect(application.result).resolves.toBe("applied-restart-required");
     await harness.reloader.stop();
   });
 
