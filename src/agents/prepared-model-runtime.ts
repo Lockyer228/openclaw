@@ -9,7 +9,10 @@ import {
   type PreparedModelRuntimeAuthMutation,
 } from "./prepared-model-runtime-auth-publication.js";
 import { acquirePreparedModelRuntimeLeaseFromOwners } from "./prepared-model-runtime-lease.js";
-import { registerPreparedRuntimeAuthMaterializationPublisher } from "./prepared-model-runtime-materializations.js";
+import {
+  configuredOwnersAreRequestVisible,
+  registerPreparedRuntimeAuthMaterializationPublisher,
+} from "./prepared-model-runtime-materializations.js";
 import {
   PreparedModelRuntimeOwnerNotPublishedError,
   PreparedModelRuntimeOwnerRetention,
@@ -538,11 +541,11 @@ export function refreshPreparedModelRuntimeSnapshots(
     if (!isPublicationCurrent()) {
       return;
     }
-    await drainPendingAuthMutations({
+    await drainPendingAuthMutations(
       // The final queue check, dispatch rebuild, and replacement resolution are one synchronous
       // commit. A mutation before it is adopted; a mutation after it starts a new auth transaction.
-      commit: commitReplacement,
-    });
+      commitReplacement,
+    );
   }).then(commitReplacement, (error: unknown) => {
     const refreshError = toStringifiedError(error);
     if (isPublicationCurrent()) {
@@ -572,7 +575,7 @@ function enqueuePreparedModelRuntimePublication(task: () => Promise<void>): Prom
   return publication;
 }
 
-async function drainPendingAuthMutations(options: { commit?: () => void } = {}): Promise<void> {
+async function drainPendingAuthMutations(commit?: () => void): Promise<void> {
   await authPublication.drain({
     owners,
     publish: async (entries) =>
@@ -583,9 +586,11 @@ async function drainPendingAuthMutations(options: { commit?: () => void } = {}):
         buildTimeoutMs: modelRuntimeBuildTimeoutMs,
         reusePluginGenerations: true,
       }),
-    commit: options.commit,
+    publishOwners: (publishedOwners) => replyDispatchPublication.replace(publishedOwners),
+    commit,
     onOwnerFailure: (error) => {
       const refreshError = toStringifiedError(error);
+      notifyPreparedModelRuntimePublication({ phase: "failed", error: refreshError });
       log.warn(`auth-triggered model runtime refresh failed: ${String(refreshError)}`);
     },
   });
@@ -642,27 +647,17 @@ function invalidateForAuthMutation(event: PreparedModelRuntimeAuthMutation): voi
       authPublication.adoptTransaction(transaction, pendingModelRuntimeReplacement.gateId);
       return;
     }
-    await drainPendingAuthMutations({
-      commit: () => {
-        if (pendingModelRuntimeReplacement) {
-          authPublication.adoptTransaction(transaction, pendingModelRuntimeReplacement.gateId);
-          return;
-        }
-        if (!authPublication.prepareCommit(transaction)) {
-          return;
-        }
-        const transactionOwners = authPublication.owners(transaction);
-        replyDispatchPublication.replace(
-          owners.values(),
-          new Set(
-            transactionOwners.flatMap((owner) =>
-              owner.input.agentId ? [owner.input.agentId] : [],
-            ),
-          ),
-        );
-        authPublication.resolve(transaction, owners);
+    await drainPendingAuthMutations(() => {
+      if (pendingModelRuntimeReplacement) {
+        authPublication.adoptTransaction(transaction, pendingModelRuntimeReplacement.gateId);
+        return;
+      }
+      if (!authPublication.resolve(transaction, owners)) {
+        return;
+      }
+      if (configuredOwnersAreRequestVisible(owners)) {
         notifyPreparedModelRuntimePublication({ phase: "published" });
-      },
+      }
     });
   });
   notifyPreparedModelRuntimePublication({ phase: "invalidated" });

@@ -123,16 +123,12 @@ export class PreparedReplyDispatchPublicationOwner {
     this.#publication = removeReplyDispatchRuntimeProjections(this.#publication, agentIds);
   }
 
-  replace(owners: Iterable<PreparedModelRuntimeOwner>, agentIds: ReadonlySet<string>): void {
-    const replacements = buildReplyDispatchPublication(
-      [...owners].filter((owner) =>
-        owner.input.agentId ? agentIds.has(owner.input.agentId) : false,
-      ),
-    );
+  replace(owners: readonly PreparedModelRuntimeOwner[]): void {
+    const replacements = buildReplyDispatchPublication(owners);
     this.#publication = replaceReplyDispatchRuntimeProjections(
       this.#publication,
       replacements,
-      agentIds,
+      new Set(replacements.runtimes.map((runtime) => runtime.agentId)),
     );
   }
 

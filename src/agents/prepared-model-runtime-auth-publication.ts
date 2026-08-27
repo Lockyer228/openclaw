@@ -16,7 +16,6 @@ type PreparedModelRuntimeAuthTransaction = {
   adoptedBy?: PreparedModelRuntimeReplacementGateId;
   ownerGates: Map<PreparedModelRuntimeOwner, Deferred<PreparedModelRuntimeSnapshot>>;
   publicationQueued: boolean;
-  readyOwners: Set<PreparedModelRuntimeOwner>;
 };
 
 export class PreparedModelRuntimeAuthPublicationOwner {
@@ -33,10 +32,8 @@ export class PreparedModelRuntimeAuthPublicationOwner {
       (this.#transaction = {
         ownerGates: new Map(),
         publicationQueued: false,
-        readyOwners: new Set(),
       });
     for (const owner of invalidatedOwners) {
-      transaction.readyOwners.delete(owner);
       let gate = transaction.ownerGates.get(owner);
       if (!gate) {
         gate = createDeferredCore<PreparedModelRuntimeSnapshot>();
@@ -86,24 +83,62 @@ export class PreparedModelRuntimeAuthPublicationOwner {
     return transaction;
   }
 
-  prepareCommit(transaction: PreparedModelRuntimeAuthTransaction): boolean {
-    if (this.#transaction !== transaction) {
-      return false;
-    }
-    this.clearOwnerGates(transaction);
-    return true;
-  }
-
-  owners(transaction: PreparedModelRuntimeAuthTransaction): readonly PreparedModelRuntimeOwner[] {
-    return [...transaction.ownerGates.keys()];
-  }
-
   resolve(
     transaction: PreparedModelRuntimeAuthTransaction,
     owners: Map<string, PreparedModelRuntimeOwner>,
-  ): void {
-    if (this.#transaction === transaction) {
+    entries?: readonly { owner: PreparedModelRuntimeOwner }[],
+    publishOwners?: (owners: readonly PreparedModelRuntimeOwner[]) => void,
+  ): boolean {
+    if (this.#transaction !== transaction) {
+      return false;
+    }
+    if (entries) {
+      if (transaction.adoptedBy) {
+        return false;
+      }
+      const completed = entries.flatMap(({ owner }) => {
+        const gate = transaction.ownerGates.get(owner);
+        return gate &&
+          owner.pending === gate.promise &&
+          owners.get(ownerKey(owner.input)) === owner &&
+          owner.snapshot &&
+          !owner.needsRefresh
+          ? [{ owner, gate, snapshot: owner.snapshot }]
+          : [];
+      });
+      if (completed.length === 0 || !publishOwners) {
+        return false;
+      }
+      // Publish the replacement projection before releasing exact-gate waiters. If projection
+      // construction fails, restoring pending keeps the failed generation unavailable.
+      for (const { owner } of completed) {
+        owner.pending = undefined;
+      }
+      try {
+        publishOwners(completed.map(({ owner }) => owner));
+      } catch (error) {
+        for (const { owner, gate } of completed) {
+          if (transaction.ownerGates.get(owner) === gate && owner.pending === undefined) {
+            owner.pending = gate.promise;
+          }
+        }
+        throw error;
+      }
+      for (const { owner, gate, snapshot } of completed) {
+        if (transaction.ownerGates.get(owner) === gate) {
+          transaction.ownerGates.delete(owner);
+          gate.resolve(snapshot);
+        }
+      }
+      return false;
+    }
+    if (transaction.adoptedBy) {
       this.#transaction = undefined;
+    } else if (transaction.ownerGates.size === 0) {
+      this.#transaction = undefined;
+      return true;
+    } else {
+      return false;
     }
     this.clearOwnerGates(transaction);
     for (const [owner, gate] of transaction.ownerGates) {
@@ -119,6 +154,7 @@ export class PreparedModelRuntimeAuthPublicationOwner {
         );
       }
     }
+    return true;
   }
 
   reject(transaction: PreparedModelRuntimeAuthTransaction, error: Error): void {
@@ -145,6 +181,7 @@ export class PreparedModelRuntimeAuthPublicationOwner {
         input: PreparedModelRuntimeOwner["input"];
       }>,
     ) => Promise<void>;
+    publishOwners?: (owners: readonly PreparedModelRuntimeOwner[]) => void;
     commit?: () => void;
     onOwnerFailure?: (error: unknown) => void;
   }): Promise<void> {
@@ -162,11 +199,6 @@ export class PreparedModelRuntimeAuthPublicationOwner {
         .map((owner) => ({ owner, input: owner.input }));
       try {
         await params.publish(entries);
-        for (const { owner } of entries) {
-          if (!owner.needsRefresh) {
-            this.#transaction?.readyOwners.add(owner);
-          }
-        }
       } catch (error) {
         if (this.#transaction?.adoptedBy) {
           // The replacement transaction exclusively settles adopted gates from its own result.
@@ -182,7 +214,6 @@ export class PreparedModelRuntimeAuthPublicationOwner {
             ),
         );
         for (const { owner } of failedOwners) {
-          this.#transaction?.readyOwners.delete(owner);
           const gate = this.#transaction?.ownerGates.get(owner);
           if (gate) {
             if (owner.pending === gate.promise) {
@@ -195,10 +226,11 @@ export class PreparedModelRuntimeAuthPublicationOwner {
         if (failedOwners.length > 0) {
           params.onOwnerFailure?.(error);
         }
-        // Newer events remain owned by this worker even when they target independent owners.
-        if (this.#events.length === 0 && this.#transaction?.readyOwners.size === 0) {
-          throw error;
-        }
+        continue;
+      }
+      const transaction = this.#transaction;
+      if (transaction) {
+        this.resolve(transaction, params.owners, entries, params.publishOwners);
       }
     }
     // The queue check and commit share one synchronous section so no mutation can be orphaned.
