@@ -1348,7 +1348,8 @@ export async function noteStateIntegrity(
     });
     const mainRecoveryWedged: MainSessionRecoveryIntegrityCandidate[] = [];
     const wedgedSubagentSessions: Array<{ key: string; reason: string }> = [];
-    const pluginStateScanner = createPluginSessionStateDoctorScanner({ cfg, env });
+    const sqlitePluginStateScanner = createPluginSessionStateDoctorScanner({ cfg, env });
+    const legacyPluginStateScanner = createPluginSessionStateDoctorScanner({ cfg, env });
     let mainEntry: SessionEntry | undefined;
     let sqliteNewKeyIndex = 0;
     const recent: Array<{ entry: SessionEntry; order: number; sessionKey: string }> = [];
@@ -1365,7 +1366,6 @@ export async function noteStateIntegrity(
     };
     const inspectMergedEntry = (sessionKey: string, entry: SessionEntry, order: number) => {
       addRecent(sessionKey, entry, order);
-      pluginStateScanner.scanEntry(sessionKey, entry);
       if (sessionKey === mainKey) {
         mainEntry = entry;
       }
@@ -1380,6 +1380,7 @@ export async function noteStateIntegrity(
       { agentId, storePath: sqliteStorePath },
       ({ entry, sessionKey }) => {
         sqliteSessionKeys.add(sessionKey);
+        sqlitePluginStateScanner.scanEntry(sessionKey, entry);
         const order = legacyOrder.get(sessionKey) ?? legacyEntries.length + sqliteNewKeyIndex++;
         inspectMergedEntry(sessionKey, entry, order);
         const recovery = inspectMainSessionRecoveryEntry(sessionKey, entry);
@@ -1393,6 +1394,7 @@ export async function noteStateIntegrity(
       if (sqliteSessionKeys.has(sessionKey)) {
         continue;
       }
+      legacyPluginStateScanner.scanEntry(sessionKey, entry);
       inspectMergedEntry(sessionKey, entry, legacyOrder.get(sessionKey) ?? mergedEntryCount);
       mergedEntryCount += 1;
     }
@@ -1505,8 +1507,15 @@ export async function noteStateIntegrity(
       }
 
       await runPluginSessionStateDoctorRepairs({
-        scan: pluginStateScanner.result(),
-        absoluteStorePath,
+        scan: sqlitePluginStateScanner.result(),
+        store: { kind: "sqlite", agentId, path: sqliteStorePath },
+        prompter,
+        warnings,
+        changes,
+      });
+      await runPluginSessionStateDoctorRepairs({
+        scan: legacyPluginStateScanner.result(),
+        store: { kind: "legacy", path: absoluteStorePath },
         prompter,
         warnings,
         changes,
