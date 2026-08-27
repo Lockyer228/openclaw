@@ -455,7 +455,11 @@ describe("worker session tool topology", () => {
           via: "spawn",
         }),
         method: "sessions.create",
-        options: { resolveGatewayContext, timeoutMs: null },
+        options: {
+          resolveGatewayContext,
+          sessionMutationCommitGuard: expect.any(Function),
+          timeoutMs: null,
+        },
         params: expect.not.objectContaining({ task: expect.anything() }),
       }),
     );

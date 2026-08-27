@@ -236,6 +236,36 @@ describe("typed in-process agent authorization", () => {
     expect(committed).toBe(false);
   });
 
+  it("composes caller authority into the session mutation commit guard", async () => {
+    const admitted = createContext();
+    const assertCallerCurrent = vi.fn();
+    admitted.getGatewayMethodRegistry = () =>
+      createGatewayMethodRegistry([
+        {
+          name: "sessions.create",
+          scope: "operator.write",
+          owner: { kind: "core", area: "sessions" },
+          handler: ({ respond, sessionMutationCommitGuard }: GatewayRequestHandlerOptions) => {
+            sessionMutationCommitGuard?.();
+            respond(true, { key: "agent:main:dashboard:child" });
+          },
+        },
+      ]);
+
+    await dispatchGatewayMethodInProcess(
+      "sessions.create",
+      { agentId: "main" },
+      {
+        forceSyntheticClient: true,
+        resolveGatewayContext: () => admitted,
+        sessionMutationCommitGuard: assertCallerCurrent,
+        syntheticScopes: ["operator.write"],
+      },
+    );
+
+    expect(assertCallerCurrent).toHaveBeenCalledOnce();
+  });
+
   it("preserves the scoped operator identity across synthetic model-initiated session creation", async () => {
     const owner = createOperatorClient({
       profileId: "model-spawn-owner",

@@ -75,6 +75,7 @@ describe("trusted in-process Gateway session creation", () => {
     mocks.hasContext = false;
     const admitted = {} as GatewayRequestContext;
     const resolveGatewayContext = () => admitted;
+    const sessionMutationCommitGuard = vi.fn();
     const creation = {
       via: "spawn" as const,
       actor: { type: "agent" as const, id: "main" },
@@ -84,6 +85,7 @@ describe("trusted in-process Gateway session creation", () => {
 
     await callInProcessGatewayToolWithCreation("sessions.create", { agentId: "main" }, creation, {
       resolveGatewayContext,
+      sessionMutationCommitGuard,
     });
 
     expect(mocks.dispatch).toHaveBeenCalledWith(
@@ -91,6 +93,7 @@ describe("trusted in-process Gateway session creation", () => {
       { agentId: "main" },
       expect.objectContaining({
         resolveGatewayContext: expect.any(Function),
+        sessionMutationCommitGuard,
         sessionCreation: creation,
       }),
     );

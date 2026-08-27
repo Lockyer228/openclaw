@@ -77,10 +77,6 @@ function operationKey(operationSeed: string, purpose: string): string {
   return sha256Base64Url(`openclaw.worker-session-tool-operation.v1\0${operationSeed}\0${purpose}`);
 }
 
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  signal?.throwIfAborted();
-}
-
 function childSessionKey(operationSeed: string, targetAgentId: string): string {
   return `agent:${targetAgentId}:dashboard:cloud-${sha256HexPrefixCore(
     `openclaw.worker-session-tool-operation.v1\0${operationSeed}\0child-session`,
@@ -107,14 +103,13 @@ export function createWorkerSessionToolExecutor(params: {
     childSessionKey: string;
     signal?: AbortSignal;
   }) => {
-    throwIfAborted(operation.signal);
+    operation.signal?.throwIfAborted();
     const sourceEnvironment = params.environments.get(operation.identity.environmentId);
     if (
       !sourceEnvironment ||
       sourceEnvironment.state !== "attached" ||
       sourceEnvironment.ownerEpoch !== operation.identity.ownerEpoch ||
-      sourceEnvironment.attachedSessionIds.length !== 1 ||
-      sourceEnvironment.attachedSessionIds[0] !== operation.source.sessionId
+      !isDeepStrictEqual(sourceEnvironment.attachedSessionIds, [operation.source.sessionId])
     ) {
       throw new Error("Worker source environment changed before child spawn");
     }
@@ -139,7 +134,7 @@ export function createWorkerSessionToolExecutor(params: {
           timeoutMs: null,
         });
       }
-      throwIfAborted(operation.signal);
+      operation.signal?.throwIfAborted();
       exactSource({ identity: operation.identity, placements: params.placements });
       let loaded = loadGatewaySessionEntryReadOnly(operation.childSessionKey, {
         agentId: targetAgentId,
@@ -185,6 +180,8 @@ export function createWorkerSessionToolExecutor(params: {
             },
             {
               resolveGatewayContext: params.resolveGatewayContext,
+              sessionMutationCommitGuard: () =>
+                exactSource({ identity: operation.identity, placements: params.placements }),
               ...(operation.signal ? { signal: operation.signal } : {}),
               timeoutMs: null,
             },
@@ -246,7 +243,7 @@ export function createWorkerSessionToolExecutor(params: {
           }
         };
         const childPlacement = params.placements.get(childSessionId);
-        throwIfAborted(operation.signal);
+        operation.signal?.throwIfAborted();
         exactSource({ identity: operation.identity, placements: params.placements });
         if (childPlacement?.state !== "active") {
           try {
@@ -271,7 +268,7 @@ export function createWorkerSessionToolExecutor(params: {
         }
         assertActiveChildPlacement();
         exactSource({ identity: operation.identity, placements: params.placements });
-        throwIfAborted(operation.signal);
+        operation.signal?.throwIfAborted();
         assertExactChild({
           childSessionKey: operation.childSessionKey,
           childSessionId,
@@ -308,7 +305,7 @@ export function createWorkerSessionToolExecutor(params: {
             let sendResult: Record<string, unknown> | undefined;
             for (let attempt = 0; attempt < 2; attempt += 1) {
               try {
-                throwIfAborted(operation.signal);
+                operation.signal?.throwIfAborted();
                 exactSource({ identity: operation.identity, placements: params.placements });
                 assertExactChild({
                   childSessionKey: operation.childSessionKey,
@@ -457,7 +454,7 @@ export function createWorkerSessionToolExecutor(params: {
     idempotencyKey: string;
     signal?: AbortSignal;
   }) => {
-    throwIfAborted(operation.signal);
+    operation.signal?.throwIfAborted();
     exactSource({ identity: operation.identity, placements: params.placements });
     const config = getRuntimeConfig();
     const executeFencedSend = async () => {
@@ -490,7 +487,7 @@ export function createWorkerSessionToolExecutor(params: {
       });
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
-          throwIfAborted(operation.signal);
+          operation.signal?.throwIfAborted();
           exactSource({ identity: operation.identity, placements: params.placements });
           assertCurrentTarget();
           return await tool.execute(operation.request.toolCallId, {
@@ -538,7 +535,7 @@ export function createWorkerSessionToolExecutor(params: {
         }
       };
       assertPublicationAuthority();
-      throwIfAborted(request.signal);
+      request.signal?.throwIfAborted();
       const publication = await params.githubPublication.requestForClaim({
         claim: source.turnClaim,
         sessionKey: source.sessionKey,

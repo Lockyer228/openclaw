@@ -84,6 +84,7 @@ type DispatchGatewayMethodInProcessOptions = {
   timeoutMs?: number;
   signal?: AbortSignal;
   resolveGatewayContext?: GatewayContextResolver;
+  sessionMutationCommitGuard?: () => void;
 };
 
 type ResolvedInProcessGatewayDispatch = {
@@ -276,7 +277,7 @@ export async function dispatchGatewayMethodInProcessRaw(
   options?: DispatchGatewayMethodInProcessOptions,
 ): Promise<GatewayMethodDispatchResponse> {
   return await withInProcessGatewayDispatch(method, options, async (resolved) => {
-    const sessionMutationCommitGuard = options?.resolveGatewayContext
+    const assertGatewayContextCurrent = options?.resolveGatewayContext
       ? () => {
           if (options.resolveGatewayContext?.() !== resolved.context) {
             throw new Error(
@@ -285,6 +286,13 @@ export async function dispatchGatewayMethodInProcessRaw(
           }
         }
       : undefined;
+    const sessionMutationCommitGuard =
+      assertGatewayContextCurrent || options?.sessionMutationCommitGuard
+        ? () => {
+            assertGatewayContextCurrent?.();
+            options?.sessionMutationCommitGuard?.();
+          }
+        : undefined;
     return await dispatchGatewayRequestInProcessRaw(method, params, {
       client: resolved.client,
       context: resolved.context,

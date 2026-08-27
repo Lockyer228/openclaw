@@ -21,6 +21,7 @@ import { callGatewayTool } from "./gateway.js";
 
 type InProcessGatewayCallOptions = {
   resolveGatewayContext?: GatewayContextResolver;
+  sessionMutationCommitGuard?: () => void;
 };
 
 export type InProcessGatewayCaller = <T = Record<string, unknown>>(
@@ -221,6 +222,9 @@ async function callInProcessGatewayToolBound<T>(
           forceSyntheticClient: true,
           syntheticScopes: scopes,
           ...(options.sessionCreation ? { sessionCreation: options.sessionCreation } : {}),
+          ...(options.sessionMutationCommitGuard
+            ? { sessionMutationCommitGuard: options.sessionMutationCommitGuard }
+            : {}),
           ...(options.signal ? { signal: options.signal } : {}),
           ...(options.timeoutMs !== undefined && options.timeoutMs !== null
             ? { timeoutMs: options.timeoutMs }
@@ -251,6 +255,7 @@ export async function callInProcessGatewayToolWithCreation<T = Record<string, un
   creation: TrustedSessionCreation,
   options: {
     resolveGatewayContext?: GatewayContextResolver;
+    sessionMutationCommitGuard?: () => void;
     signal?: AbortSignal;
     timeoutMs?: number | null;
   } = {},
