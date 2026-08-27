@@ -1368,9 +1368,9 @@ describe("resolvePluginCapabilityProviders", () => {
     expectActiveRegistryLookup(["google"]);
     expect(mocks.loadBundledCapabilityRuntimeRegistry).toHaveBeenCalledWith({
       pluginIds: ["google"],
-      env: process.env,
+      onlyPluginIds: ["google"],
+      activate: false,
       config: { tts: { provider: "google" } },
-      pluginSdkResolution: undefined,
     });
   });
 
@@ -1400,9 +1400,9 @@ describe("resolvePluginCapabilityProviders", () => {
     expectResolvedCapabilityProviderIds(providers, ["openai", "google"]);
     expect(mocks.loadBundledCapabilityRuntimeRegistry).toHaveBeenCalledWith({
       pluginIds: ["google"],
-      env: process.env,
+      onlyPluginIds: ["google"],
+      activate: false,
       config: { tts: { provider: "google" } },
-      pluginSdkResolution: undefined,
     });
   });
 
