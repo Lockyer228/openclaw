@@ -98,8 +98,7 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
     publication?: GatewayHotReloadPublication,
   ) => {
     assertIrreversibleReloadPlanHasRecoveryOwner(plan, restartRecoveryAvailable);
-    const isTransactionCurrent = () =>
-      !isRestartRetryStopped() && (publication?.isCurrent?.() ?? true);
+    const isCurrent = () => !isRestartRetryStopped() && (publication?.isCurrent?.() ?? true);
     const state = params.getState();
     const nextState = { ...state };
 
@@ -160,7 +159,7 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
     let pluginReloadAborted = false;
     const isLifecycleReloadAborted = () => isGatewayReloadGenerationAborted(myGeneration);
     const isPluginReloadAborted = () =>
-      pluginReloadAborted || !isTransactionCurrent() || isLifecycleReloadAborted();
+      pluginReloadAborted || !isCurrent() || isLifecycleReloadAborted();
     let runtimeCommitted = false;
     let preparedModelRuntimeReplacementGateId: PreparedModelRuntimeReplacementGateId | undefined;
     let recoveryRestartScheduled = false;
@@ -308,7 +307,7 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
         restartGateway: true,
         restartReasons: [`hot reload recovery: ${surface}`],
       };
-      if (!isTransactionCurrent()) {
+      if (!isCurrent()) {
         params.logReload.warn(
           `${surface} failed after config supersession${detail}; recovery deferred to the newer config`,
         );
@@ -431,7 +430,7 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
         if (targets.size === 0 || shouldSkipChannelRestart) {
           return;
         }
-        if (await waitForActiveWorkBeforeChannelReload(targets, isTransactionCurrent)) {
+        if (await waitForActiveWorkBeforeChannelReload(targets, isCurrent)) {
           params.logChannels.info(
             "channel reload before plugin replace cancelled by config supersession or restart",
           );
@@ -586,10 +585,7 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
     // Plugin replacement can admit new agent work while an account monitor stays live.
     // Recheck that work here; durable ingress replay remains owned by the fresh monitor drain.
     if (!pluginReloadAborted && hasLiveChannelTargets && !shouldSkipChannelRestart) {
-      pluginReloadAborted = await waitForActiveWorkBeforeChannelReload(
-        channelTargets,
-        isTransactionCurrent,
-      );
+      pluginReloadAborted = await waitForActiveWorkBeforeChannelReload(channelTargets, isCurrent);
     }
     if (pluginReloadAborted) {
       params.logChannels.info("channel restart cancelled by config supersession or restart");
@@ -705,9 +701,9 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
     }
     if (shouldRewarmProviderAuthState(plan)) {
       void warmCurrentProviderAuthStateOffMainThread(nextConfig, {
-        isCancelled: () => !isTransactionCurrent(),
+        isCancelled: () => !isCurrent(),
       }).catch((err: unknown) => {
-        if (isTransactionCurrent()) {
+        if (isCurrent()) {
           params.logReload.warn(`provider auth state rewarm failed: ${String(err)}`);
         }
       });
