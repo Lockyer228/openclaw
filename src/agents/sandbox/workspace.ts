@@ -21,6 +21,7 @@ import {
   DEFAULT_SOUL_FILENAME,
   DEFAULT_USER_FILENAME,
   ensureAgentWorkspace,
+  writeFileIfMissing,
 } from "../workspace.js";
 
 const log = createSubsystemLogger("sandbox-workspace");
@@ -58,7 +59,7 @@ export async function ensureSandboxWorkspace(
           }
           try {
             const content = await readWorkspaceBootstrapFile(opened.fd);
-            await fs.writeFile(dest, content, { encoding: "utf-8", flag: "wx" });
+            await writeFileIfMissing(dest, content);
           } catch (err) {
             if (err instanceof RangeError) {
               log.warn(

@@ -131,6 +131,35 @@ async function expectPathMissing(filePath: string): Promise<void> {
   await expect(fs.access(filePath)).rejects.toHaveProperty("code", "ENOENT");
 }
 
+function injectPartialPublicationFailure(dir: string, fileName: string) {
+  const realOpen = fs.open.bind(fs);
+  let injected = true;
+  return vi.spyOn(fs, "open").mockImplementation(async (filePath, flags, mode) => {
+    const handle = await realOpen(filePath, flags, mode);
+    const target = typeof filePath === "string" ? filePath : filePath.toString();
+    const resolvedDir = path.resolve(dir);
+    const isPublicationTarget =
+      path.resolve(path.dirname(target)) === resolvedDir &&
+      (path.basename(target) === fileName || path.basename(target).endsWith(".tmp"));
+    if (injected && isPublicationTarget) {
+      injected = false;
+      const realHandleWrite = handle.writeFile.bind(handle);
+      handle.writeFile = (async (data: unknown, encoding?: BufferEncoding) => {
+        await realHandleWrite("# PARTIAL\n", typeof encoding === "string" ? encoding : "utf8");
+        const err = new Error("ENOSPC") as NodeJS.ErrnoException;
+        err.code = "ENOSPC";
+        throw err;
+      }) as typeof handle.writeFile;
+    }
+    return handle;
+  });
+}
+
+async function listTempSiblings(dir: string): Promise<string[]> {
+  const names = await fs.readdir(dir);
+  return names.filter((name) => name.endsWith(".tmp")).sort();
+}
+
 async function expectWorkspaceVanished(action: Promise<unknown>): Promise<void> {
   // Recently attested generated workspaces must not be silently recreated after
   // deletion or wipe; that could hide user data loss.
@@ -950,6 +979,37 @@ describe("ensureAgentWorkspace", () => {
     ]) {
       await expectPathMissing(path.join(tempDir, filename));
     }
+  });
+
+  it("does not publish a partial AGENTS.md when the first write fails", async () => {
+    const tempDir = await makeTempWorkspace("openclaw-workspace-");
+    const agentsPath = path.join(tempDir, DEFAULT_AGENTS_FILENAME);
+    const spy = injectPartialPublicationFailure(tempDir, DEFAULT_AGENTS_FILENAME);
+
+    try {
+      await expect(
+        ensureAgentWorkspace({ dir: tempDir, ensureBootstrapFiles: true }),
+      ).rejects.toThrow();
+      await expectPathMissing(agentsPath);
+      expect(await listTempSiblings(tempDir)).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+
+    await ensureAgentWorkspace({ dir: tempDir, ensureBootstrapFiles: true });
+    const content = await fs.readFile(agentsPath, "utf-8");
+    expect(content).not.toBe("# PARTIAL\n");
+    expect(content.trim().length).toBeGreaterThan(0);
+  });
+
+  it("leaves an existing complete AGENTS.md winner unchanged", async () => {
+    const tempDir = await makeTempWorkspace("openclaw-workspace-");
+    const agentsPath = path.join(tempDir, DEFAULT_AGENTS_FILENAME);
+    await fs.writeFile(agentsPath, "WINNER\n", "utf-8");
+
+    await ensureAgentWorkspace({ dir: tempDir, ensureBootstrapFiles: true });
+
+    expect(await fs.readFile(agentsPath, "utf-8")).toBe("WINNER\n");
   });
 });
 
