@@ -26,6 +26,7 @@ import { sha256Base64Url, sha256HexPrefixCore } from "../../infra/crypto-digest.
 import { normalizeAgentId } from "../../routing/session-key.js";
 import { WORKER_TOOL_NAMES } from "../../worker/tool-authority.js";
 import type { GitHubPublicationCoordinator } from "../github-publication.js";
+import type { GatewayContextResolver } from "../server-methods/types.js";
 import { loadGatewaySessionEntryReadOnly } from "../session-utils.js";
 import type { WorkerConnectionIdentity } from "./connection-identity.js";
 import type { WorkerSessionPlacementStore } from "./placement-store.js";
@@ -80,15 +81,15 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   signal?.throwIfAborted();
 }
 
-function childSessionKey(params: { operationSeed: string; targetAgentId: string }): string {
-  const suffix = sha256HexPrefixCore(
-    `openclaw.worker-session-tool-operation.v1\0${params.operationSeed}\0child-session`,
+function childSessionKey(operationSeed: string, targetAgentId: string): string {
+  return `agent:${targetAgentId}:dashboard:cloud-${sha256HexPrefixCore(
+    `openclaw.worker-session-tool-operation.v1\0${operationSeed}\0child-session`,
     32,
-  );
-  return `agent:${params.targetAgentId}:dashboard:cloud-${suffix}`;
+  )}`;
 }
 
 export function createWorkerSessionToolExecutor(params: {
+  resolveGatewayContext: GatewayContextResolver;
   placements: WorkerSessionPlacementStore;
   environments: Pick<WorkerEnvironmentService, "get">;
   dispatchChild: WorkerPlacementDispatchContract["dispatch"];
@@ -183,6 +184,7 @@ export function createWorkerSessionToolExecutor(params: {
               inheritedToolPolicy: { version: 1, allow: authorizedTools, deny: [] },
             },
             {
+              resolveGatewayContext: params.resolveGatewayContext,
               ...(operation.signal ? { signal: operation.signal } : {}),
               timeoutMs: null,
             },
@@ -424,6 +426,7 @@ export function createWorkerSessionToolExecutor(params: {
               {
                 agentId: identity.agentId,
                 sessionKey: identity.sessionKey,
+                gatewayContextResolver: params.resolveGatewayContext,
                 operationalRunInstance: identity.operationalRunInstance,
                 executionIdentityToken: identity.executionIdentityToken,
                 receiptAuthority: identity.receiptAuthority,
@@ -436,7 +439,14 @@ export function createWorkerSessionToolExecutor(params: {
             workerIdentity = undefined;
           }
         })
-      : await executeSpawn();
+      : await withGatewayToolCallerIdentity(
+          {
+            agentId: operation.source.agentId,
+            sessionKey: operation.source.sessionKey,
+            gatewayContextResolver: params.resolveGatewayContext,
+          },
+          executeSpawn,
+        );
   };
 
   const send = async (operation: {
@@ -618,10 +628,7 @@ export function createWorkerSessionToolExecutor(params: {
         let childKey = started.childSessionKey;
         if (request.toolName === "sessions_spawn" && !childKey) {
           const targetAgentId = normalizeAgentId(request.request.agentId ?? source.agentId);
-          childKey = childSessionKey({
-            operationSeed: started.operationSeed,
-            targetAgentId,
-          });
+          childKey = childSessionKey(started.operationSeed, targetAgentId);
           if (
             !params.placements.bindWorkerSessionToolOperationChild({
               sourceSessionId: source.sessionId,

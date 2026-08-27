@@ -3457,6 +3457,50 @@ test("sessions.create commits no session after delegated authority closes", asyn
   ).toBeUndefined();
 });
 
+test("sessions.create commits no child after its bound Gateway is replaced", async () => {
+  const { storePath } = await createSessionStoreDir();
+  const sessionKey = "agent:main:dashboard:gateway-replacement-race";
+  const admitted = {};
+  const replacement = {};
+  let current = admitted;
+  let guardCalls = 0;
+  const firstGuard = createDeferredCore();
+  const writerEntered = createDeferredCore();
+  const releaseWriter = createDeferredCore();
+  const resolvedStore = resolveSqliteStoreScope(storePath, { agentId: "main" });
+  const heldWriter = runExclusiveSqliteSessionWrite(resolvedStore, async () => {
+    writerEntered.resolve();
+    await releaseWriter.promise;
+  });
+  await writerEntered.promise;
+  const creating = directSessionReq(
+    "sessions.create",
+    { agentId: "main", key: sessionKey },
+    {
+      sessionMutationAuthorization: {
+        assertCurrent: () => {
+          if (current !== admitted) {
+            throw new Error("current gateway instance binding was replaced");
+          }
+          guardCalls += 1;
+          if (guardCalls === 1) {
+            firstGuard.resolve();
+          }
+        },
+        assertTargetCurrent: vi.fn(),
+      },
+    },
+  );
+
+  await firstGuard.promise;
+  current = replacement;
+  releaseWriter.resolve();
+  await heldWriter;
+
+  await expect(creating).rejects.toThrow("current gateway instance binding was replaced");
+  expect(loadSessionEntry({ agentId: "main", sessionKey, storePath })).toBeUndefined();
+});
+
 test("sessions.create starts no initial turn when authority closes after session commit", async () => {
   await createSessionStoreDir();
   const sessionKey = "agent:main:dashboard:authority-post-commit";
