@@ -278,7 +278,7 @@ describe("prepared model runtime reload auth adoption", () => {
   it.each([
     { failedAgentId: "worker", successfulAgentId: "research" },
     { failedAgentId: "research", successfulAgentId: "worker" },
-  ])(
+  ] as const)(
     "isolates simultaneous scoped auth failure for $failedAgentId",
     async ({ failedAgentId, successfulAgentId }) => {
       mocks.configuredAgentIds = ["default", "worker", "research"];
