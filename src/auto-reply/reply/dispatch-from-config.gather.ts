@@ -97,23 +97,9 @@ export async function gatherDispatchRequest(
     turnAdoptionState: turnAdoptionLifecycle ? turnAdoptionState : undefined,
   };
   const { cfg, dispatcher } = normalizedParams;
-  const finishReplyOperationAborted = () => {
-    noteDispatchProcessedOutcome({ outcome: "skipped", reason: "reply_operation_aborted" });
-    messageAuditTerminal?.note("skipped", { reason: "reply_operation_aborted" });
-    return {
-      status: "complete" as const,
-      result: {
-        queuedFinal: false,
-        counts: dispatcher.getQueuedCounts(),
-      },
-    };
-  };
   bindReplyDispatcherConversationContext(dispatcher, ctx.agentText);
   const replyOperationRunState: ReplyOperationRunState =
     resolveReplyOperationRunState(normalizedParams.replyOptions) ?? {};
-  if (params.replyOptions?.abortSignal?.aborted) {
-    return finishReplyOperationAborted();
-  }
   const diagnosticsEnabled = isDiagnosticsEnabled(cfg);
   const channel = normalizeLowercaseStringOrEmpty(ctx.Surface ?? ctx.Provider ?? "unknown");
   const chatId = ctx.To ?? ctx.From;
@@ -183,6 +169,19 @@ export async function gatherDispatchRequest(
     }
     messageLifecycle.markProcessed(outcome, opts);
   };
+  const finishReplyOperationAborted = () => {
+    recordProcessed("skipped", { reason: "reply_operation_aborted" });
+    return {
+      status: "complete" as const,
+      result: {
+        queuedFinal: false,
+        counts: dispatcher.getQueuedCounts(),
+      },
+    };
+  };
+  if (params.replyOptions?.abortSignal?.aborted) {
+    return finishReplyOperationAborted();
+  }
 
   const recordAgentDispatchStarted = () => {
     if (!diagnosticsEnabled || agentDispatchStartedAt > 0) {

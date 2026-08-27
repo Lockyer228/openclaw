@@ -27,7 +27,7 @@ export function racePromiseWithAbortSignal<T>(
   if (signal.aborted) {
     return Promise.reject(abortError());
   }
-  let onAbort: (() => void) | undefined;
+  let onAbort!: () => void;
   const aborted = new Promise<never>((_, reject) => {
     onAbort = () => reject(abortError());
     signal.addEventListener("abort", onAbort, { once: true });
@@ -36,9 +36,7 @@ export function racePromiseWithAbortSignal<T>(
     }
   });
   return Promise.race([promise, aborted]).finally(() => {
-    if (onAbort) {
-      signal.removeEventListener("abort", onAbort);
-    }
+    signal.removeEventListener("abort", onAbort);
   });
 }
 

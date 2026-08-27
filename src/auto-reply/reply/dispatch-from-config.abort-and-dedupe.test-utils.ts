@@ -9,6 +9,10 @@ import { createTestRegistry } from "../../test-utils/channel-plugins.js";
 import type { MsgContext } from "../templating.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import {
+  DispatchReplyOperationAbortedError,
+  runWithDispatchAbortSignal,
+} from "./dispatch-from-config.abort.js";
+import {
   acpMocks,
   agentEventMocks,
   createDispatcher,
@@ -150,6 +154,19 @@ beforeAll(globalBeforeAll0);
 describe("dispatchReplyFromConfig", () => {
   beforeEach(describe0BeforeEach0);
 
+  it("does not start dispatch work when the caller already aborted", async () => {
+    const abort = new AbortController();
+    const run = vi.fn();
+    const onWorkStarted = vi.fn();
+    abort.abort();
+
+    await expect(
+      runWithDispatchAbortSignal(abort.signal, run, onWorkStarted),
+    ).rejects.toBeInstanceOf(DispatchReplyOperationAbortedError);
+    expect(run).not.toHaveBeenCalled();
+    expect(onWorkStarted).not.toHaveBeenCalled();
+  });
+
   it("audits an aborted prepared-runtime wait as a skipped reply operation", async () => {
     setNoAbort();
     const abort = new AbortController();
@@ -167,7 +184,7 @@ describe("dispatchReplyFromConfig", () => {
           ChatType: "direct",
           SessionKey: "agent:main:main",
         }),
-        cfg: emptyConfig,
+        cfg: { ...emptyConfig, diagnostics: { enabled: true } },
         dispatcher: createDispatcher(),
         replyOptions: { abortSignal: abort.signal },
         usePublishedModelRuntime: true,
@@ -191,6 +208,12 @@ describe("dispatchReplyFromConfig", () => {
         outcome: "skipped",
         reasonCode: "reply_operation_aborted",
       });
+      expect(diagnosticMocks.logMessageProcessed).toHaveBeenCalledWith(
+        expect.objectContaining({
+          outcome: "skipped",
+          reason: "reply_operation_aborted",
+        }),
+      );
       expect(preparedLookup).toHaveBeenCalledWith({
         agentId: "main",
         abortSignal: abort.signal,
