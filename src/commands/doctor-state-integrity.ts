@@ -1516,7 +1516,9 @@ export async function noteStateIntegrity(
         mainKey,
         mainEntry,
         isSessionKeyOccupied,
-        absoluteStorePath,
+        store: sqliteSessionKeys.has(mainKey)
+          ? { kind: "sqlite", agentId, path: sqliteStorePath }
+          : { kind: "legacy", path: absoluteStorePath },
         stateDir,
         sessionPathOpts,
         prompter,

@@ -9,6 +9,7 @@ import {
   resolveSessionFilePathCore,
   type resolveSessionFilePathOptions,
 } from "../config/sessions/paths.js";
+import { applySessionEntryLifecycleMutation } from "../config/sessions/session-accessor.js";
 import type { SessionEntry } from "../config/sessions/types.js";
 import { updateLegacySessionStore } from "../infra/state-migrations.legacy-session-store.js";
 import { parseAgentSessionKey } from "../sessions/session-key-utils.js";
@@ -28,6 +29,10 @@ type DoctorPrompterLike = {
   }) => Promise<boolean>;
   note?: typeof note;
 };
+
+type HeartbeatMainSessionStore =
+  | { kind: "legacy"; path: string }
+  | { kind: "sqlite"; agentId: string; path: string };
 
 type TranscriptHeartbeatSummary = {
   inspectedMessages: number;
@@ -279,7 +284,7 @@ export async function repairHeartbeatPoisonedMainSession(params: {
   mainKey: string;
   mainEntry?: SessionEntry;
   isSessionKeyOccupied: (sessionKey: string) => boolean;
-  absoluteStorePath: string;
+  store: HeartbeatMainSessionStore;
   stateDir: string;
   sessionPathOpts: ReturnType<typeof resolveSessionFilePathOptions>;
   prompter: DoctorPrompterLike;
@@ -299,6 +304,9 @@ export async function repairHeartbeatPoisonedMainSession(params: {
       params.sessionPathOpts,
     );
   } catch {
+    transcriptPath = undefined;
+  }
+  if (transcriptPath && !fs.existsSync(transcriptPath)) {
     transcriptPath = undefined;
   }
   const candidate = resolveHeartbeatMainSessionRepairCandidate({
@@ -342,19 +350,38 @@ export async function repairHeartbeatPoisonedMainSession(params: {
     return false;
   }
   let movedEntry: SessionEntry | undefined;
-  await updateLegacySessionStore(params.absoluteStorePath, (currentStore) => {
-    const currentEntry = currentStore[mainKey];
-    const currentCandidate = resolveHeartbeatMainSessionRepairCandidate({
-      entry: currentEntry,
-      transcriptPath,
+  if (params.store.kind === "sqlite") {
+    const result = await applySessionEntryLifecycleMutation({
+      agentId: params.store.agentId,
+      removals: [
+        {
+          archiveRemovedTranscript: false,
+          expectedEntry: mainEntry,
+          sessionKey: mainKey,
+        },
+      ],
+      skipMaintenance: true,
+      storePath: params.store.path,
+      upserts: [{ entry: mainEntry, sessionKey: recoveredKey }],
     });
-    if (!currentCandidate || "declineReason" in currentCandidate) {
-      return;
+    if (result.removedSessionKeys.includes(mainKey)) {
+      movedEntry = mainEntry;
     }
-    if (moveHeartbeatMainSessionEntry({ store: currentStore, mainKey, recoveredKey })) {
-      movedEntry = currentEntry;
-    }
-  });
+  } else {
+    await updateLegacySessionStore(params.store.path, (currentStore) => {
+      const currentEntry = currentStore[mainKey];
+      const currentCandidate = resolveHeartbeatMainSessionRepairCandidate({
+        entry: currentEntry,
+        transcriptPath,
+      });
+      if (!currentCandidate || "declineReason" in currentCandidate) {
+        return;
+      }
+      if (moveHeartbeatMainSessionEntry({ store: currentStore, mainKey, recoveredKey })) {
+        movedEntry = currentEntry;
+      }
+    });
+  }
   if (!movedEntry) {
     params.warnings.push(`- Main session ${mainKey} changed before repair could move it.`);
     return false;

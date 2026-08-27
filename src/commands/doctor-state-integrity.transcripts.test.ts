@@ -8,7 +8,11 @@ import {
   resolveSessionStorePathCore,
   resolveSessionTranscriptsDirForAgent,
 } from "../config/sessions/paths.js";
-import { upsertSessionEntryCore } from "../config/sessions/session-accessor.js";
+import {
+  listSessionEntryKeysReadOnly,
+  loadSessionEntryReadOnly,
+  upsertSessionEntryCore,
+} from "../config/sessions/session-accessor.js";
 import type { SessionEntry } from "../config/sessions/types.js";
 import { closeOpenClawAgentDatabasesForTest } from "../state/openclaw-agent-db.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
@@ -291,6 +295,37 @@ describe("doctor transcript and heartbeat session repairs", () => {
     expect(text).toContain("1/1 recent sessions are missing transcripts");
     expect(text).toContain(sqliteStorePath);
     expect(text).not.toContain(path.join(path.dirname(storePath), "openclaw-agent.ops.sqlite"));
+  });
+
+  it("moves a non-default SQLite heartbeat main session without recreating sessions.json", async () => {
+    const cfg: OpenClawConfig = { agents: { entries: { main: {}, ops: {} } } };
+    setupSessionState(cfg, process.env, tempHome, "ops");
+    const storePath = resolveSessionStorePathCore(cfg.session?.store, { agentId: "ops" });
+    const mainKey = "agent:ops:main";
+    await upsertSessionEntryCore(
+      { agentId: "ops", sessionKey: mainKey, storePath },
+      {
+        heartbeatIsolatedBaseSessionKey: mainKey,
+        sessionId: "sqlite-heartbeat-ops",
+        updatedAt: Date.now(),
+      },
+    );
+    const confirmRuntimeRepair = vi.fn(async (params: { message: string }) =>
+      params.message.startsWith("Move heartbeat-owned main session"),
+    );
+
+    await noteStateIntegrity(cfg, { confirmRuntimeRepair, note: noteMock });
+
+    const keys = listSessionEntryKeysReadOnly({ agentId: "ops", storePath });
+    const recoveredKey = keys.find((key) => key.startsWith("agent:ops:heartbeat-recovered-"));
+    expect(keys).not.toContain(mainKey);
+    if (!recoveredKey) {
+      throw new Error("expected recovered SQLite heartbeat session key");
+    }
+    expect(
+      loadSessionEntryReadOnly({ agentId: "ops", sessionKey: recoveredKey, storePath })?.sessionId,
+    ).toBe("sqlite-heartbeat-ops");
+    expect(fs.existsSync(storePath)).toBe(false);
   });
 
   it("moves a heartbeat-poisoned main session and clears stale TUI restore pointers", async () => {
