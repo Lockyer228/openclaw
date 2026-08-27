@@ -36,6 +36,13 @@ function githubBodyReadFailure() {
   );
 }
 
+function fetchInputUrl(input: string | URL | Request): string {
+  if (typeof input === "string") {
+    return input;
+  }
+  return input instanceof URL ? input.href : input.url;
+}
+
 function accessAssertion(issuer: unknown): string {
   const payload = Buffer.from(JSON.stringify({ iss: issuer })).toString("base64url");
   return `header.${payload}.signature`;
@@ -304,49 +311,66 @@ describe("authenticated GitHub identity sync", () => {
     });
   });
 
-  it("deduplicates concurrent lookups across Gateway connections", async () => {
+  it("coalesces concurrent immutable account-id lookups across Gateway connections", async () => {
     await withOpenClawTestState({ scenario: "minimal" }, async () => {
-      const profile = ensureProfileForTailscaleIdentity({ login: "ada@github" });
       let resolveLookup: ((response: Response) => void) | undefined;
-      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementationOnce(
-        async () =>
-          await new Promise<Response>((resolve) => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = fetchInputUrl(input);
+        if (url.endsWith("/cdn-cgi/access/get-identity")) {
+          return githubResponse({
+            id: 58493,
+            email: "ada@example.com",
+            idp: { type: "github" },
+          });
+        }
+        if (url === "https://api.github.com/user/58493") {
+          return await new Promise<Response>((resolve) => {
             resolveLookup = resolve;
-          }),
-      );
+          });
+        }
+        throw new Error(`unexpected URL: ${url}`);
+      });
 
-      const connections = Array.from({ length: 10 }, () =>
-        createAuthenticatedGitHubIdentitySync({
-          authResult: {
-            ok: true,
-            method: "tailscale",
-            user: "ada@github",
-            tailscaleIdentity: { login: "ada@github", name: "Ada" },
-          },
-        }),
-      );
+      const connections = Array.from({ length: 10 }, () => cloudflareSync({}));
       const requests = connections.map((sync) => {
         if (!sync) {
           throw new Error("GitHub test identity did not produce a sync function");
         }
         return sync();
       });
-      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
-      resolveLookup?.(githubResponse({ id: 583231, login: "Ada" }));
-
-      await expect(Promise.all(requests)).resolves.toEqual(
-        Array.from({ length: 10 }, () => expect.objectContaining({ profileId: profile.id })),
+      await vi.waitFor(() =>
+        expect(
+          fetchMock.mock.calls.filter(
+            ([input]) => fetchInputUrl(input) === "https://api.github.com/user/58493",
+          ),
+        ).toHaveLength(1),
       );
-      expect(getUserProfileListItem(profile.id).githubIdentity).toMatchObject({ login: "Ada" });
-      expect(fetchMock).toHaveBeenCalledOnce();
+      resolveLookup?.(githubResponse({ id: 58493, login: "Ada" }));
+
+      const results = await Promise.all(requests);
+      expect(new Set(results.map((result) => result.profileId)).size).toBe(1);
+      expect(getUserProfileListItem(results[0]!.profileId).githubIdentity).toMatchObject({
+        login: "Ada",
+      });
+      expect(
+        fetchMock.mock.calls.filter(
+          ([input]) => fetchInputUrl(input) === "https://api.github.com/user/58493",
+        ),
+      ).toHaveLength(1);
     });
   });
 
-  it("freshly verifies a mutable login before attaching a later connection", async () => {
+  it("independently verifies a mutable login before attaching a concurrent connection", async () => {
     await withOpenClawTestState({ scenario: "minimal" }, async () => {
+      let resolveFirst: ((response: Response) => void) | undefined;
       const fetchMock = vi
         .spyOn(globalThis, "fetch")
-        .mockResolvedValueOnce(githubResponse({ id: 1, login: "ada" }))
+        .mockImplementationOnce(
+          async () =>
+            await new Promise<Response>((resolve) => {
+              resolveFirst = resolve;
+            }),
+        )
         .mockResolvedValueOnce(githubResponse({ id: 2, login: "ada" }));
       const createSync = () =>
         createAuthenticatedGitHubIdentitySync({
@@ -358,8 +382,15 @@ describe("authenticated GitHub identity sync", () => {
           },
         });
 
-      const first = await createSync()?.();
-      const reassigned = await createSync()?.();
+      const firstRequest = createSync()?.();
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+      const reassignedRequest = createSync()?.();
+      expect(fetchMock).toHaveBeenCalledOnce();
+
+      resolveFirst?.(githubResponse({ id: 1, login: "ada" }));
+      const first = await firstRequest;
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+      const reassigned = await reassignedRequest;
 
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(reassigned?.profileId).not.toBe(first?.profileId);
