@@ -2,6 +2,7 @@
 // oxfmt-ignore
 import {
   getPreparedModelRuntimeMocks,
+  getPreparedModelRuntimeTestApi,
   resetPreparedModelRuntimeHarness,
 } from "./prepared-model-runtime.test-harness.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -313,16 +314,18 @@ describe("prepared reply dispatch runtime", () => {
     );
   });
 
-  it("keeps run admission pending while auth publication replaces its projection", async () => {
+  it("aborts run admission without retaining an owner after auth publication", async () => {
     mocks.configuredAgentIds = ["default"];
     const config = {};
     const input = {
       agentId: "default",
       agentDir: "/tmp/unused-agent",
       config,
-      workspaceDir: "/tmp/unused-workspace",
+      workspaceDir: "/tmp/dynamic-workspace",
     };
     await refreshPreparedModelRuntimeSnapshots(config, { gatewayLifecycle: true });
+    const testApi = getPreparedModelRuntimeTestApi();
+    expect(testApi.getPreparedModelRuntimeOwnerCountForTest()).toBe(1);
     let finishAuthRefresh: (() => void) | undefined;
     mocks.ensureOpenClawModelsJson.mockImplementationOnce(
       async () =>
@@ -333,16 +336,23 @@ describe("prepared reply dispatch runtime", () => {
 
     mocks.mutationListener?.({ agentDir: input.agentDir, affectsInheritedStores: false });
     await vi.waitFor(() => expect(finishAuthRefresh).toBeDefined());
-    const admission = acquireAgentRunPreparedModelRuntime(input);
+    const abort = new AbortController();
+    const admission = acquireAgentRunPreparedModelRuntime(input, { abortSignal: abort.signal });
     const observed = admission.then(
       () => "resolved",
       () => "rejected",
     );
     await expect(Promise.race([observed, Promise.resolve("pending")])).resolves.toBe("pending");
+    abort.abort(new Error("request cancelled"));
+    await expect(admission).rejects.toMatchObject({ name: "AbortError" });
+    expect(testApi.getPreparedModelRuntimeOwnerCountForTest()).toBe(1);
 
     finishAuthRefresh?.();
-    const lease = await admission;
+    await loadPublishedGatewayReplyDispatchRuntime({ agentId: "default" });
+    expect(testApi.getPreparedModelRuntimeOwnerCountForTest()).toBe(1);
+    const lease = await acquireAgentRunPreparedModelRuntime(input);
     expect(lease.snapshot).toMatchObject({ agentId: "default", agentDir: input.agentDir });
+    expect(testApi.getPreparedModelRuntimeOwnerCountForTest()).toBe(2);
     lease.release();
   });
 });

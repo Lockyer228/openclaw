@@ -7,11 +7,13 @@ import {
   resolveAgentWorkspaceDir,
   resolveSessionAgentId,
 } from "../../agents/agent-scope.js";
+import type { PreparedReplyDispatchRuntime } from "../../agents/prepared-model-runtime.types.js";
 import { normalizeExplicitSessionKey } from "../../config/sessions/explicit-session-key-normalization.js";
 import {
   deriveInboundMessageHookContext,
   toPluginInboundClaimPair,
 } from "../../hooks/message-hook-mappers.js";
+import { isAbortError } from "../../infra/abort-signal.js";
 import { isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
 import { measureDiagnosticsTimelineSpan } from "../../infra/diagnostics-timeline.js";
 import {
@@ -95,10 +97,7 @@ export async function gatherDispatchRequest(
     turnAdoptionState: turnAdoptionLifecycle ? turnAdoptionState : undefined,
   };
   const { cfg, dispatcher } = normalizedParams;
-  bindReplyDispatcherConversationContext(dispatcher, ctx.agentText);
-  const replyOperationRunState: ReplyOperationRunState =
-    resolveReplyOperationRunState(normalizedParams.replyOptions) ?? {};
-  if (params.replyOptions?.abortSignal?.aborted) {
+  const finishReplyOperationAborted = () => {
     noteDispatchProcessedOutcome({ outcome: "skipped", reason: "reply_operation_aborted" });
     messageAuditTerminal?.note("skipped", { reason: "reply_operation_aborted" });
     return {
@@ -108,6 +107,12 @@ export async function gatherDispatchRequest(
         counts: dispatcher.getQueuedCounts(),
       },
     };
+  };
+  bindReplyDispatcherConversationContext(dispatcher, ctx.agentText);
+  const replyOperationRunState: ReplyOperationRunState =
+    resolveReplyOperationRunState(normalizedParams.replyOptions) ?? {};
+  if (params.replyOptions?.abortSignal?.aborted) {
+    return finishReplyOperationAborted();
   }
   const diagnosticsEnabled = isDiagnosticsEnabled(cfg);
   const channel = normalizeLowercaseStringOrEmpty(ctx.Surface ?? ctx.Provider ?? "unknown");
@@ -360,14 +365,23 @@ export async function gatherDispatchRequest(
   const preparedReplyDispatchAgentId = boundAcpDispatchSessionKey
     ? resolveSessionAgentId({ sessionKey, config: cfg, fallbackAgentId: ctx.AgentId })
     : sessionAgentId;
-  const preparedReplyDispatchRuntime = params.usePublishedModelRuntime
-    ? await traceReplyPhase("reply.load_prepared_dispatch_runtime", async () => {
-        const { loadPublishedGatewayReplyDispatchRuntime } = await loadPreparedModelRuntime();
-        return await loadPublishedGatewayReplyDispatchRuntime({
-          agentId: preparedReplyDispatchAgentId,
-        });
-      })
-    : undefined;
+  let preparedReplyDispatchRuntime: PreparedReplyDispatchRuntime | undefined;
+  try {
+    preparedReplyDispatchRuntime = params.usePublishedModelRuntime
+      ? await traceReplyPhase("reply.load_prepared_dispatch_runtime", async () => {
+          const { loadPublishedGatewayReplyDispatchRuntime } = await loadPreparedModelRuntime();
+          return await loadPublishedGatewayReplyDispatchRuntime({
+            agentId: preparedReplyDispatchAgentId,
+            abortSignal: params.replyOptions?.abortSignal,
+          });
+        })
+      : undefined;
+  } catch (error) {
+    if (params.replyOptions?.abortSignal?.aborted && isAbortError(error)) {
+      return finishReplyOperationAborted();
+    }
+    throw error;
+  }
   const workspaceDir =
     preparedReplyDispatchRuntime?.workspaceDir ?? resolveAgentWorkspaceDir(cfg, sessionAgentId);
   const replyOperationCoordinator = createDispatchReplyOperationCoordinator({

@@ -1,4 +1,5 @@
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { createAbortError, racePromiseWithAbortSignal } from "../infra/abort-signal.js";
 import { resolvePublishedModelCatalogOwner } from "./prepared-model-catalog-owner.js";
 import { PreparedModelRuntimeOwnerNotPublishedError } from "./prepared-model-runtime.errors.js";
 import type {
@@ -137,21 +138,28 @@ export class PreparedReplyDispatchPublicationOwner {
 
   readonly load = async ({
     agentId,
+    abortSignal,
   }: {
     agentId: string;
+    abortSignal?: AbortSignal;
   }): Promise<PreparedReplyDispatchRuntime | undefined> => {
     for (;;) {
+      if (abortSignal?.aborted) {
+        throw createAbortError("Prepared reply dispatch admission aborted", {
+          cause: abortSignal.reason,
+        });
+      }
       if (!this.host.isGatewayLifecycleActive()) {
         return undefined;
       }
       const replacement = this.host.getPendingReplacement();
       if (replacement) {
-        await replacement;
+        await racePromiseWithAbortSignal(replacement, abortSignal);
         continue;
       }
       const pendingOwner = this.host.getPendingOwnerPublication(agentId);
       if (pendingOwner) {
-        await pendingOwner;
+        await racePromiseWithAbortSignal(pendingOwner, abortSignal);
         continue;
       }
       const matches = this.#publication.runtimes.filter((runtime) => runtime.agentId === agentId);

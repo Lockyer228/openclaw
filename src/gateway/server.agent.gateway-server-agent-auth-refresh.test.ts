@@ -7,6 +7,7 @@ import {
   loadPublishedGatewayReplyDispatchRuntime,
   registerPreparedModelRuntimePublicationListener,
 } from "../agents/prepared-model-runtime.js";
+import { getActiveGatewayRootWorkCount } from "../process/gateway-work-admission.js";
 import { installConnectedSessionStoreGatewaySuite } from "./test-helpers.connected-session-store.js";
 import {
   agentCommandMock,
@@ -14,6 +15,7 @@ import {
   installGatewayTestHooks,
   onceMessage,
   prepareGatewayReplyRuntimeForTest,
+  rpcReq,
   testState,
 } from "./test-helpers.js";
 
@@ -32,7 +34,13 @@ type AgentRpcFrame = {
   type: "res";
   id: string;
   ok: boolean;
-  payload?: { runId?: string; status?: string };
+  payload?: {
+    runId?: string;
+    status?: string;
+    stopReason?: string;
+    timeoutPhase?: string;
+    providerStarted?: boolean;
+  };
   error?: { code?: string; message?: string };
 };
 
@@ -95,11 +103,14 @@ describe("gateway agent auth refresh dispatch", () => {
     testState.agentsConfig = undefined;
   });
 
-  test("waits for an affected auth generation without blocking siblings", async () => {
+  test("aborts one affected waiter without cancelling shared auth publication", async () => {
     const affectedAgentId = "auth-wait";
-    const affectedRunId = "idem-agent-auth-wait";
+    const abortedRunId = "idem-agent-auth-aborted";
+    const waitingRunId = "idem-agent-auth-waiting";
     const siblingRunId = "idem-agent-auth-sibling";
+    const subsequentRunId = "idem-agent-auth-subsequent";
     const before = await prepareAuthDispatchAgents(affectedAgentId);
+    const activeWorkBefore = getActiveGatewayRootWorkCount();
     const publicationGate = createDeferred<{ agentDir: string; wrote: false }>();
     const modelsConfig = await import("../agents/models-config.js");
     const ensureOpenClawModelsJson = modelsConfig.ensureOpenClawModelsJson;
@@ -131,35 +142,71 @@ describe("gateway agent auth refresh dispatch", () => {
         before.agentDir,
       );
 
-      const affected = sendAgentRpc(gatewaySuite.ws, {
+      const aborted = sendAgentRpc(gatewaySuite.ws, {
         agentId: affectedAgentId,
-        runId: affectedRunId,
+        runId: abortedRunId,
       });
-      await affected.accepted;
+      const waiting = sendAgentRpc(gatewaySuite.ws, {
+        agentId: affectedAgentId,
+        runId: waitingRunId,
+      });
+      await Promise.all([aborted.accepted, waiting.accepted]);
       const sibling = sendAgentRpc(gatewaySuite.ws, { agentId: "main", runId: siblingRunId });
       await sibling.accepted;
       await expect(sibling.final).resolves.toMatchObject({ ok: true, payload: { status: "ok" } });
       expect(agentCommandCallsFor(siblingRunId)).toHaveLength(1);
-      expect(agentCommandCallsFor(affectedRunId)).toHaveLength(0);
+      expect(agentCommandCallsFor(abortedRunId)).toHaveLength(0);
+      expect(agentCommandCallsFor(waitingRunId)).toHaveLength(0);
+      await vi.waitFor(() => expect(getActiveGatewayRootWorkCount()).toBe(activeWorkBefore + 2));
+
+      const abort = await rpcReq(gatewaySuite.ws, "chat.abort", {
+        sessionKey: `agent:${affectedAgentId}:main`,
+        runId: abortedRunId,
+      });
+      expect(abort).toMatchObject({
+        ok: true,
+        payload: { aborted: true, runIds: [abortedRunId] },
+      });
+      await vi.waitFor(() => expect(getActiveGatewayRootWorkCount()).toBe(activeWorkBefore + 1));
+      await expect(aborted.final).resolves.toMatchObject({
+        ok: true,
+        payload: {
+          status: "timeout",
+          stopReason: "rpc",
+          timeoutPhase: "queue",
+          providerStarted: false,
+        },
+      });
       await expect(
-        Promise.race([affected.final.then(() => "settled"), Promise.resolve("pending")]),
+        Promise.race([waiting.final.then(() => "settled"), Promise.resolve("pending")]),
       ).resolves.toBe("pending");
 
       publicationGate.resolve({ agentDir: before.agentDir, wrote: false });
       await published.promise;
       const after = await loadPublishedGatewayReplyDispatchRuntime({ agentId: affectedAgentId });
       expect(after).not.toBe(before.runtime);
-      await expect(affected.final).resolves.toMatchObject({
+      await expect(waiting.final).resolves.toMatchObject({
         ok: true,
         payload: { status: "ok" },
       });
-      const affectedCalls = agentCommandCallsFor(affectedRunId);
+      const affectedCalls = agentCommandCallsFor(waitingRunId);
       expect(affectedCalls).toHaveLength(1);
       expect(affectedCalls[0]?.[4]).toMatchObject({
         config: after?.config,
         pluginGeneration: after?.pluginGeneration,
       });
+      const subsequent = sendAgentRpc(gatewaySuite.ws, {
+        agentId: affectedAgentId,
+        runId: subsequentRunId,
+      });
+      await subsequent.accepted;
+      await expect(subsequent.final).resolves.toMatchObject({
+        ok: true,
+        payload: { status: "ok" },
+      });
+      expect(agentCommandCallsFor(subsequentRunId)).toHaveLength(1);
     } finally {
+      publicationGate.resolve({ agentDir: before.agentDir, wrote: false });
       unregister();
       ensureSpy.mockRestore();
     }
