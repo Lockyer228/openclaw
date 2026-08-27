@@ -77,10 +77,17 @@ describe("doctor transcript and heartbeat session repairs", () => {
   });
 
   it("detects orphan transcripts and offers archival remediation", async () => {
-    const cfg: OpenClawConfig = {};
-    setupSessionState(cfg, process.env, process.env.HOME ?? "");
-    const sessionsDir = resolveSessionTranscriptsDirForAgent("main", process.env, () => tempHome);
-    fs.writeFileSync(path.join(sessionsDir, "orphan-session.jsonl"), '{"type":"session"}\n');
+    const cfg: OpenClawConfig = { agents: { entries: { alpha: {}, beta: {} } } };
+    const sessionsDirs = ["alpha", "beta"].map((agentId) => {
+      setupSessionState(cfg, process.env, process.env.HOME ?? "", agentId);
+      const sessionsDir = resolveSessionTranscriptsDirForAgent(
+        agentId,
+        process.env,
+        () => tempHome,
+      );
+      fs.writeFileSync(path.join(sessionsDir, `orphan-${agentId}.jsonl`), '{"type":"session"}\n');
+      return sessionsDir;
+    });
     const confirmRuntimeRepair = vi.fn(async (params: { message: string }) =>
       params.message.includes("This only renames them to *.deleted.<timestamp>."),
     );
@@ -88,16 +95,21 @@ describe("doctor transcript and heartbeat session repairs", () => {
     expect(stateIntegrityText()).toContain(
       "These .jsonl files are no longer referenced by sessions.json",
     );
-    expect(stateIntegrityText()).toContain("Examples: orphan-session.jsonl");
-    const archivePrompt = repairPromptCalls(confirmRuntimeRepair).find((prompt) =>
+    expect(stateIntegrityText()).toContain("Examples: orphan-alpha.jsonl");
+    expect(stateIntegrityText()).toContain("Examples: orphan-beta.jsonl");
+    const archivePrompts = repairPromptCalls(confirmRuntimeRepair).filter((prompt) =>
       prompt.message?.includes("This only renames them to *.deleted.<timestamp>."),
     );
-    expect(archivePrompt?.requiresInteractiveConfirmation).toBe(true);
-    const files = fs.readdirSync(sessionsDir);
-    const archivedOrphanTranscripts = files.filter((name) =>
-      name.startsWith("orphan-session.jsonl.deleted."),
-    );
-    expect(archivedOrphanTranscripts.length).toBeGreaterThan(0);
+    expect(archivePrompts).toHaveLength(2);
+    expect(archivePrompts.every((prompt) => prompt.requiresInteractiveConfirmation)).toBe(true);
+    for (const [index, sessionsDir] of sessionsDirs.entries()) {
+      const agentId = index === 0 ? "alpha" : "beta";
+      expect(
+        fs
+          .readdirSync(sessionsDir)
+          .some((name) => name.startsWith(`orphan-${agentId}.jsonl.deleted.`)),
+      ).toBe(true);
+    }
   });
 
   it("uses SQLite session rows for transcript integrity without orphan false positives", async () => {
@@ -220,16 +232,28 @@ describe("doctor transcript and heartbeat session repairs", () => {
   );
 
   it("prints openclaw-only verification hints when recent sessions are missing transcripts", async () => {
-    const cfg: OpenClawConfig = {};
-    writeSessionStore(cfg, {
-      "agent:main:main": {
-        sessionId: "missing-transcript",
-        updatedAt: Date.now(),
-      },
-    });
+    const cfg: OpenClawConfig = { agents: { entries: { alpha: {}, beta: {} } } };
+    for (const agentId of ["alpha", "beta"]) {
+      writeSessionStore(
+        cfg,
+        {
+          [`agent:${agentId}:missing`]: {
+            sessionId: `missing-${agentId}`,
+            updatedAt: Date.now(),
+          },
+        },
+        agentId,
+      );
+      const storePath = resolveSessionStorePathCore(cfg.session?.store, { agentId });
+      await upsertSessionEntryCore(
+        { agentId, sessionKey: `agent:${agentId}:sqlite`, storePath },
+        { sessionId: `sqlite-${agentId}`, updatedAt: Date.now() },
+      );
+    }
     const text = await runStateIntegrityText(cfg);
-    expect(text).toContain("recent sessions are missing transcripts");
-    expect(text).toMatch(/openclaw sessions --store ".*openclaw-agent\.sqlite"/);
+    expect(text.match(/recent sessions are missing transcripts/g)).toHaveLength(2);
+    expect(text).toContain(path.join("agents", "alpha", "agent", "openclaw-agent.sqlite"));
+    expect(text).toContain(path.join("agents", "beta", "agent", "openclaw-agent.sqlite"));
     expect(text).toMatch(
       /openclaw sessions cleanup --store ".*openclaw-agent\.sqlite" --dry-run --fix-missing/,
     );

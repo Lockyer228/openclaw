@@ -5,13 +5,11 @@ import { asNullableObjectRecord } from "@openclaw/normalization-core/record-coer
 import type { note } from "../../packages/terminal-core/src/note.js";
 import { isHeartbeatOkResponse, isHeartbeatUserMessage } from "../auto-reply/heartbeat-filter.js";
 import { formatSessionArchiveTimestamp } from "../config/sessions/artifacts.js";
-import { resolveMainSessionKey } from "../config/sessions/main-session.js";
 import {
   resolveSessionFilePathCore,
   type resolveSessionFilePathOptions,
 } from "../config/sessions/paths.js";
 import type { SessionEntry } from "../config/sessions/types.js";
-import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { updateLegacySessionStore } from "../infra/state-migrations.legacy-session-store.js";
 import { parseAgentSessionKey } from "../sessions/session-key-utils.js";
 import { clearTuiLastSessionPointers } from "../tui/tui-last-session.js";
@@ -278,7 +276,7 @@ if (process.env.VITEST || process.env.NODE_ENV === "test") {
  * prevents moving a newly-human main session.
  */
 export async function repairHeartbeatPoisonedMainSession(params: {
-  cfg: OpenClawConfig;
+  mainKey: string;
   mainEntry?: SessionEntry;
   isSessionKeyOccupied: (sessionKey: string) => boolean;
   absoluteStorePath: string;
@@ -288,7 +286,7 @@ export async function repairHeartbeatPoisonedMainSession(params: {
   warnings: string[];
   changes: string[];
 }): Promise<boolean> {
-  const mainKey = resolveMainSessionKey(params.cfg);
+  const mainKey = params.mainKey;
   const mainEntry = params.mainEntry;
   if (!mainEntry?.sessionId) {
     return false;
