@@ -17,7 +17,7 @@ export default definePluginEntry({
       return;
     }
     const pluginConfig = resolveOpenShellPluginConfig(api.pluginConfig);
-    registerSandboxBackend("openshell", {
+    const unregister = registerSandboxBackend("openshell", {
       factory: createOpenShellSandboxBackendFactory({
         pluginConfig,
       }),
@@ -25,6 +25,11 @@ export default definePluginEntry({
         pluginConfig,
       }),
       resolveWorkdir: () => pluginConfig.remoteWorkspaceDir,
+    });
+    api.registerService({
+      id: "openshell-sandbox-cleanup",
+      start: () => {},
+      stop: unregister,
     });
   },
 });
