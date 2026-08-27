@@ -1323,6 +1323,7 @@ describe("gateway hot reload model state", () => {
       const abortSignal = await reviewStarted.promise;
       const reconcileHeartbeatJobs = vi.fn(async () => {
         await releaseReconciliation.promise;
+        return "converged" as const;
       });
       let state = {
         ...createDefaultGatewayReloadState(),
@@ -1335,7 +1336,7 @@ describe("gateway hot reload model state", () => {
         },
       });
 
-      await applyHotReload(
+      const reload = applyHotReload(
         buildGatewayReloadPlan(["skills.workshop.autonomous.mode"]),
         nextConfig,
         {
@@ -1345,8 +1346,10 @@ describe("gateway hot reload model state", () => {
         },
       );
 
-      expect(reconcileHeartbeatJobs).toHaveBeenCalledWith(nextConfig);
+      await waitForFast(() => expect(reconcileHeartbeatJobs).toHaveBeenCalledWith(nextConfig));
       expect(abortSignal.aborted).toBe(true);
+      releaseReconciliation.resolve();
+      await reload;
       releaseReview.resolve();
       await activeRun;
       await expect(readFile(outputPath, "utf8")).rejects.toThrow();
@@ -1665,7 +1668,7 @@ describe("gateway hot reload model state", () => {
       applyHotReload(createHotTailPlan({ restartHeartbeat: true }), {
         agents: { defaults: { heartbeat: { every: "1h" } } },
       } as OpenClawConfig),
-    ).rejects.toThrow("heartbeat monitor");
+    ).rejects.toThrow("cron monitor");
 
     expect(heartbeatRunner.updateConfig).not.toHaveBeenCalled();
     expect(setState).not.toHaveBeenCalled();

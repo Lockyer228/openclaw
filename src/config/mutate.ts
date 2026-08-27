@@ -65,6 +65,7 @@ import {
 } from "./runtime-snapshot.js";
 import {
   attachRuntimeConfigWriteApplication,
+  copyRuntimeConfigWriteApplication,
   getRuntimeConfigWriteApplication,
 } from "./runtime-write-application.js";
 import type { ConfigFileSnapshot, OpenClawConfig } from "./types.js";
@@ -1000,10 +1001,10 @@ export async function replaceConfigFile(params: {
         await replaceConfigFileUnlocked({
           ...params,
           snapshot: prepared.snapshot,
-          writeOptions: {
+          writeOptions: copyRuntimeConfigWriteApplication(params.writeOptions, {
             ...prepared.writeOptions,
             ...params.writeOptions,
-          },
+          }),
         }),
     );
   }
@@ -1028,10 +1029,10 @@ async function replaceConfigFileUnlocked(params: {
         writeOptions: params.writeOptions,
       });
   const { snapshot, writeOptions } = prepared;
-  const mergedWriteOptions = {
+  const mergedWriteOptions = copyRuntimeConfigWriteApplication(params.writeOptions, {
     ...writeOptions,
     ...params.writeOptions,
-  };
+  });
   mergedWriteOptions.assertConfigPathForWrite?.();
   assertExpectedConfigPathMatches(snapshot, mergedWriteOptions.expectedConfigPath);
   assertConfigWriteAllowedInCurrentMode({ configPath: snapshot.path });
@@ -1048,11 +1049,14 @@ async function replaceConfigFileUnlocked(params: {
     io: params.io,
   });
   if (!writeResult) {
-    const fallbackWriteOptions: ConfigWriteOptions = {
-      baseSnapshot: snapshot,
-      ...mergedWriteOptions,
-      afterWrite,
-    };
+    const fallbackWriteOptions: ConfigWriteOptions = copyRuntimeConfigWriteApplication(
+      mergedWriteOptions,
+      {
+        baseSnapshot: snapshot,
+        ...mergedWriteOptions,
+        afterWrite,
+      },
+    );
     const ioPreCommitRuntimePreflight = params.io
       ? fallbackWriteOptions.preCommitRuntimePreflight
       : undefined;
@@ -1097,10 +1101,10 @@ async function commitPreparedConfigMutation(
     nextConfig: params.nextConfig,
     snapshot: params.snapshot,
     baseHash: params.baseHash,
-    writeOptions: {
+    writeOptions: copyRuntimeConfigWriteApplication(params.writeOptions, {
       ...params.writeOptions,
       afterWrite: params.afterWrite,
-    },
+    }),
     io: params.io,
   });
   return {
@@ -1126,10 +1130,13 @@ async function transformConfigFileAttempt<T>(
       io: params.io,
       writeOptions: params.writeOptions,
     }));
-  let mergedWriteOptions: ConfigWriteOptions = {
-    ...writeOptions,
-    ...params.writeOptions,
-  };
+  let mergedWriteOptions: ConfigWriteOptions = copyRuntimeConfigWriteApplication(
+    params.writeOptions,
+    {
+      ...writeOptions,
+      ...params.writeOptions,
+    },
+  );
   if (ownership) {
     if (!ownership.initialized) {
       ownership.initialized = true;
@@ -1137,7 +1144,7 @@ async function transformConfigFileAttempt<T>(
       ownership.ownedConfigPathForWrite = mergedWriteOptions.ownedConfigPathForWrite;
       ownership.assertConfigPathForWrite = mergedWriteOptions.assertConfigPathForWrite;
     }
-    mergedWriteOptions = {
+    mergedWriteOptions = copyRuntimeConfigWriteApplication(mergedWriteOptions, {
       ...mergedWriteOptions,
       expectedConfigPath: ownership.expectedConfigPath,
       ...(ownership.ownedConfigPathForWrite
@@ -1146,7 +1153,7 @@ async function transformConfigFileAttempt<T>(
       ...(ownership.assertConfigPathForWrite
         ? { assertConfigPathForWrite: ownership.assertConfigPathForWrite }
         : {}),
-    };
+    });
   }
   mergedWriteOptions.assertConfigPathForWrite?.();
   assertExpectedConfigPathMatches(snapshot, mergedWriteOptions.expectedConfigPath);

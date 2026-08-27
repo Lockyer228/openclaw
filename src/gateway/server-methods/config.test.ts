@@ -233,32 +233,35 @@ describe("config.patch application settlement", () => {
     );
   });
 
-  it("reports a persisted write whose runtime application was superseded", async () => {
-    const queueFollowUp = vi.fn();
-    configWriteMocks.commitGatewayConfigWrite.mockResolvedValueOnce({
-      path: "/tmp/openclaw.json",
-      config: { hooks: { enabled: true } },
-      hash: "superseded-hash",
-      application: Promise.resolve("superseded" as const),
-      queueFollowUp,
-    });
+  it.each(["superseded", "failed", "unclaimed"] as const)(
+    "reports a persisted write whose runtime application was %s",
+    async (outcome) => {
+      const queueFollowUp = vi.fn();
+      configWriteMocks.commitGatewayConfigWrite.mockResolvedValueOnce({
+        path: "/tmp/openclaw.json",
+        config: { hooks: { enabled: true } },
+        hash: `${outcome}-hash`,
+        application: Promise.resolve(outcome),
+        queueFollowUp,
+      });
 
-    const { harness, operation } = startConfigPatch({
-      raw: { hooks: { enabled: true } },
-      baseHash: "base-hash",
-    });
-    await operation;
+      const { harness, operation } = startConfigPatch({
+        raw: { hooks: { enabled: true } },
+        baseHash: "base-hash",
+      });
+      await operation;
 
-    expect(harness.respond).toHaveBeenCalledWith(
-      false,
-      undefined,
-      expect.objectContaining({
-        code: "UNAVAILABLE",
-        message: expect.stringContaining("persisted but was not applied"),
-      }),
-    );
-    expect(queueFollowUp).toHaveBeenCalledOnce();
-  });
+      expect(harness.respond).toHaveBeenCalledWith(
+        false,
+        undefined,
+        expect.objectContaining({
+          code: "UNAVAILABLE",
+          message: expect.stringContaining("persisted but was not applied"),
+        }),
+      );
+      expect(queueFollowUp).toHaveBeenCalledOnce();
+    },
+  );
 });
 
 describe("config.openFile", () => {

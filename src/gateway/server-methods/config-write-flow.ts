@@ -335,7 +335,13 @@ export async function commitGatewayConfigWrite(params: {
     // Persisted hash of the re-read file (resolveConfigSnapshotHash), i.e.
     // exactly what a follow-up config.get reports — writers ack against it.
     hash: result.persistedHash,
-    ...(application?.claimed ? { application: application.result } : {}),
+    ...(application
+      ? {
+          application: application.claimed
+            ? application.result
+            : Promise.resolve<RuntimeConfigWriteApplicationStatus>("unclaimed"),
+        }
+      : {}),
     queueFollowUp: () => {
       // Defer generation refresh/disconnect until after the RPC response so
       // the writer receives the success payload before its connection is closed.

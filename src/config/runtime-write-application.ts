@@ -1,6 +1,11 @@
 import { createDeferredCore } from "../shared/deferred.js";
 
-export type RuntimeConfigWriteApplicationStatus = "applied" | "superseded" | "failed" | "stopped";
+export type RuntimeConfigWriteApplicationStatus =
+  | "applied"
+  | "superseded"
+  | "failed"
+  | "stopped"
+  | "unclaimed";
 
 export type RuntimeConfigWriteApplicationClaim = {
   settle: (status: RuntimeConfigWriteApplicationStatus) => void;
@@ -42,6 +47,17 @@ export function attachRuntimeConfigWriteApplication<T extends object>(
     runtimeConfigWriteApplications.set(target, application);
   }
   return target;
+}
+
+/** Copies a private application receipt when rebuilding an internal write carrier. */
+export function copyRuntimeConfigWriteApplication<T extends object>(
+  source: object | undefined,
+  target: T,
+): T {
+  return attachRuntimeConfigWriteApplication(
+    target,
+    source ? runtimeConfigWriteApplications.get(source) : undefined,
+  );
 }
 
 /** Returns the private application receipt attached to a write or notification. */

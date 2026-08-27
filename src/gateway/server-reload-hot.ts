@@ -195,8 +195,7 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
         if (plan.restartHeartbeat || plan.reconcileSkillReviewJobs) {
           // Runtime publication promises that durable monitor rows reflect this config.
           // A retrying or superseded pass leaves the previous generation authoritative.
-          const monitorReconciliation = await nextState.cronState.reconcileHeartbeatJobs(nextConfig);
-          if (monitorReconciliation !== "converged") {
+          if ((await nextState.cronState.reconcileHeartbeatJobs(nextConfig)) !== "converged") {
             throw new GatewayHotReloadRecoveryError("cron monitor");
           }
         }

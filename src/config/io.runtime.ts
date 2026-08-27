@@ -46,6 +46,7 @@ import {
 } from "./runtime-snapshot.js";
 import {
   attachRuntimeConfigWriteApplication,
+  copyRuntimeConfigWriteApplication,
   getRuntimeConfigWriteApplication,
 } from "./runtime-write-application.js";
 import type { ConfigFileSnapshot, OpenClawConfig } from "./types.js";
@@ -79,7 +80,12 @@ export function registerConfigWriteListener(
     const preparedCandidate = unregisterOwner
       ? event.preparedCandidatesByOwner?.get(unregisterOwner.ownerId)
       : undefined;
-    listener({ ...baseEvent, ...(preparedCandidate ? { preparedCandidate } : {}) });
+    listener(
+      copyRuntimeConfigWriteApplication(event, {
+        ...baseEvent,
+        ...(preparedCandidate ? { preparedCandidate } : {}),
+      }),
+    );
   });
   return () => {
     unregisterListener();

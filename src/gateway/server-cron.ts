@@ -1568,7 +1568,7 @@ export function buildGatewayCronService(params: {
         }, 30_000);
         heartbeatRetryTimer.unref?.();
       }
-      return ok ? "converged" : "retry-scheduled";
+      return heartbeatOk && skillReviewOk ? "converged" : "retry-scheduled";
     };
     heartbeatReconcileTail = heartbeatReconcileTail.then(pass, pass);
     return heartbeatReconcileTail;
