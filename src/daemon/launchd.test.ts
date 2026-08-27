@@ -516,7 +516,7 @@ vi.mock("./exec-file.js", async (importOriginal) => {
     execFileUtf8: vi.fn(async (...args: Parameters<typeof actual.execFileUtf8>) =>
       state.realExecFile
         ? await actual.execFileUtf8(...args)
-        : executeLaunchctlMock(args[0], args[1]),
+        : { ...executeLaunchctlMock(args[0], args[1]), termination: "exit" as const },
     ),
   };
 });

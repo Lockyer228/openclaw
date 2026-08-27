@@ -6,6 +6,7 @@ import path from "node:path";
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildGatewayInstallPlan } from "../commands/daemon-install-helpers.js";
+import type { ExecResult } from "./exec-file.js";
 
 type ExecFileError = Error & {
   stderr?: string;
@@ -60,19 +61,15 @@ vi.mock("./exec-file.js", () => {
       args: string[],
       options: Omit<ExecFileOptionsWithStringEncoding, "encoding"> = {},
     ) => {
-      let settled:
-        | {
-            stdout: string;
-            stderr: string;
-            code: number;
-          }
-        | undefined;
+      let settled: ExecResult | undefined;
 
       execFileMock(command, args, { ...options, encoding: "utf8" }, (error, stdout, stderr) => {
         settled = {
           stdout: stdout ?? "",
           stderr: stderr || error?.message || "",
           code: error && typeof error.code === "number" ? error.code : error ? 1 : 0,
+          termination: typeof error?.code === "string" ? "error" : "exit",
+          errorCode: typeof error?.code === "string" ? error.code : undefined,
         };
       });
 
