@@ -45,7 +45,10 @@ import {
   type GatewayReloadPlan,
 } from "./config-reload-plan.js";
 import { resolveGatewayReloadSettings } from "./config-reload-settings.js";
-import type { GatewayHotReloadStatus } from "./config-reload-status.types.js";
+import type {
+  GatewayHotReloadApplicationStatus,
+  GatewayHotReloadStatus,
+} from "./config-reload-status.types.js";
 
 export type { GatewayReloadPlan } from "./config-reload-plan.js";
 const MISSING_CONFIG_RETRY_DELAY_MS = 150;
@@ -220,7 +223,7 @@ export function startGatewayConfigReloader(opts: {
     nextConfig: OpenClawConfig,
     ownership: GatewayConfigReloadTransactionOwnership,
     sourceConfig: OpenClawConfig,
-  ) => Promise<void>;
+  ) => Promise<GatewayHotReloadApplicationStatus>;
   onRestart: (
     plan: GatewayReloadPlan,
     nextConfig: OpenClawConfig,
@@ -775,8 +778,9 @@ export function startGatewayConfigReloader(opts: {
     }
 
     await opts.onConfigChange?.(plan, nextConfig);
+    let applicationStatus: GatewayHotReloadApplicationStatus;
     try {
-      await opts.onHotReload(plan, nextConfig, ownership, nextSourceConfig);
+      applicationStatus = await opts.onHotReload(plan, nextConfig, ownership, nextSourceConfig);
     } catch (error) {
       ownership.rollbackRuntimeEnv();
       throw error;
@@ -784,7 +788,7 @@ export function startGatewayConfigReloader(opts: {
     assertCurrent();
     await appliedRevision.apply(plan, nextConfig, nextConfigRevisionHash);
     await commitReloadBaseline();
-    application?.settle("applied");
+    application?.settle(applicationStatus);
     if (plan.reloadPlugins) {
       // The committed reload republished the metadata snapshot generation.
       markPluginMetadataRefreshApplied();

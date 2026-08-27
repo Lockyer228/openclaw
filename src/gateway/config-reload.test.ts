@@ -870,7 +870,7 @@ function createReloaderHarness(
       nextConfig: OpenClawConfig,
       ownership: GatewayConfigReloadTransactionOwnership,
       sourceConfig: OpenClawConfig,
-    ) => Promise<void>;
+    ) => Promise<"applied" | "restart-required">;
     onRestart?: (
       plan: GatewayReloadPlan,
       nextConfig: OpenClawConfig,
@@ -907,7 +907,7 @@ function createReloaderHarness(
         _plan: GatewayReloadPlan,
         _nextConfig: OpenClawConfig,
         _ownership: GatewayConfigReloadTransactionOwnership,
-      ) => {}),
+      ) => "applied" as const),
   );
   const onRestart = vi.fn(
     options.onRestart ?? ((_plan: GatewayReloadPlan, _nextConfig: OpenClawConfig) => {}),
@@ -1043,7 +1043,7 @@ describe("startGatewayConfigReloader include files", () => {
       logger: { error: vi.fn(), warn: vi.fn() },
     });
     const initialSnapshot = await configIo.readConfigFileSnapshot();
-    const onHotReload = vi.fn(async () => {});
+    const onHotReload = vi.fn(async () => "applied" as const);
     let signalWatcherReady!: () => void;
     const watcherReady = new Promise<void>((resolve) => {
       signalWatcherReady = resolve;
@@ -1650,7 +1650,10 @@ describe("startGatewayConfigReloader", () => {
     const harness = createReloaderHarness(vi.fn(), {
       initialSnapshotRawHash: null,
       initialAuthoredConfig: {},
-      onHotReload: async () => await hotReloadGate,
+      onHotReload: async () => {
+        await hotReloadGate;
+        return "applied" as const;
+      },
     });
     let settled = false;
     void application.result.then(() => {
@@ -1707,6 +1710,7 @@ describe("startGatewayConfigReloader", () => {
         markHotReloadStarted();
         await hotReloadGate;
         ownership.markRuntimeCommitted(runtimeConfig, plan);
+        return "applied" as const;
       },
     );
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -1797,6 +1801,26 @@ describe("startGatewayConfigReloader", () => {
     await vi.runAllTimersAsync();
 
     await expect(application.result).resolves.toBe("failed");
+    await harness.reloader.stop();
+  });
+
+  it("reports when a committed hot reload requires recovery restart", async () => {
+    const application = createRuntimeConfigWriteApplication();
+    const harness = createReloaderHarness(vi.fn(), {
+      initialSnapshotRawHash: null,
+      initialAuthoredConfig: {},
+      onHotReload: async () => "restart-required",
+    });
+
+    harness.emitWrite(
+      attachRuntimeConfigWriteApplication(
+        makeZeroDebounceHookWrite("application-restart-required"),
+        application,
+      ),
+    );
+    await vi.runAllTimersAsync();
+
+    await expect(application.result).resolves.toBe("restart-required");
     await harness.reloader.stop();
   });
 
@@ -2095,6 +2119,7 @@ describe("startGatewayConfigReloader", () => {
         writtenAtMs: Date.now(),
         afterWrite: { mode: "none", reason: "baseline-only acceptance" },
       });
+      return "applied" as const;
     };
     const harness = createReloaderHarness(vi.fn(), {
       initialConfig,
@@ -2155,6 +2180,7 @@ describe("startGatewayConfigReloader", () => {
         terminalPolicy.prepareConfig(nextConfig, { restartPending: false });
         ownership.markRuntimeCommitted(nextConfig, plan);
         harness.watcher.emit("change");
+        return "applied" as const;
       };
       const harness = createReloaderHarness(
         vi.fn(async () => rejectedSnapshot),
@@ -2220,6 +2246,7 @@ describe("startGatewayConfigReloader", () => {
         sourceFingerprint: "source-restart-b",
         writtenAtMs: Date.now(),
       });
+      return "applied" as const;
     };
     const harness = createReloaderHarness(vi.fn(), {
       initialConfig,
@@ -2331,9 +2358,13 @@ describe("startGatewayConfigReloader", () => {
         await blocked;
         expect(ownership.isCurrent()).toBe(false);
       };
+      const hotReloadA = async (...args: Parameters<typeof publishA>) => {
+        await publishA(...args);
+        return "applied" as const;
+      };
       const harness = createReloaderHarness(readSnapshot, {
         initialConfig,
-        ...(kind === "noop" ? { onNoopConfigCommit: publishA } : { onHotReload: publishA }),
+        ...(kind === "noop" ? { onNoopConfigCommit: publishA } : { onHotReload: hotReloadA }),
       });
 
       harness.watcher.emit("change");
@@ -2396,6 +2427,7 @@ describe("startGatewayConfigReloader", () => {
           recordCommitted?.();
           await tailGate;
         }
+        return "applied" as const;
       },
     );
     const promoteSnapshot = vi.fn(async (_snapshot: ConfigFileSnapshot, _reason: string) => true);
@@ -2468,6 +2500,7 @@ describe("startGatewayConfigReloader", () => {
         if (nextConfig === configA) {
           emitWrite(configB, "env-b", 2);
         }
+        return "applied";
       },
     });
     const emitWrite = (config: OpenClawConfig, hash: string, revision: number) => {
@@ -2661,6 +2694,7 @@ describe("startGatewayConfigReloader", () => {
         if (!ownership.isCurrent()) {
           throw new Error("unlinked config A was superseded");
         }
+        return "applied";
       },
     });
 
@@ -2772,6 +2806,7 @@ describe("startGatewayConfigReloader", () => {
     harness.onHotReload.mockImplementationOnce(async () => {
       markReloadStarted?.();
       await reloadBlocked;
+      return "applied";
     });
 
     harness.watcher.emit("change");
@@ -5044,7 +5079,7 @@ describe("startGatewayConfigReloader watcher error recovery", () => {
       initialPluginInstallRecords: {},
       readPluginInstallRecords: async () => ({}),
       onNoopConfigCommit: vi.fn(async () => {}),
-      onHotReload: vi.fn(async () => {}),
+      onHotReload: vi.fn(async () => "applied" as const),
       onRestart: vi.fn(),
       log,
       watchPath: "/tmp/openclaw.json",

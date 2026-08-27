@@ -96,7 +96,7 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
     plan: GatewayReloadPlan,
     nextConfig: OpenClawConfig,
     publication?: GatewayHotReloadPublication,
-  ): Promise<void> => {
+  ) => {
     assertIrreversibleReloadPlanHasRecoveryOwner(plan, restartRecoveryAvailable);
     const isTransactionCurrent = () =>
       !isRestartRetryStopped() && (publication?.isCurrent?.() ?? true);
@@ -166,8 +166,7 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
     let recoveryRestartScheduled = false;
     const laneConcurrency = resolveGatewayLaneConcurrency(nextConfig);
     const candidateEnv = publication?.runtimeEnv ?? process.env;
-    // Planning happens before candidate env publication, while channel starts
-    // happen after it. Use one candidate snapshot across both phases.
+    // Use one candidate env snapshot before publication and through later channel starts.
     const shouldSkipChannelRestart =
       isTruthyEnvValue(candidateEnv.OPENCLAW_SKIP_CHANNELS) ||
       isTruthyEnvValue(candidateEnv.OPENCLAW_SKIP_PROVIDERS);
@@ -335,8 +334,7 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
         return;
       }
       try {
-        // Reuse the config-restart path: it excludes this reload root while
-        // draining other work and fences signal delivery until restart takes over.
+        // Reuse the config-restart path to drain other work and fence restart delivery.
         const restartTransaction = requestGatewayRestart(
           recoveryPlan,
           nextConfig,
@@ -351,8 +349,7 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
           },
         );
         settleRecoveryRestart(restartTransaction, surface);
-        // Immediate emission failure already owns a lifecycle retry. The runtime
-        // is committed, so keep this transaction accepted while that retry runs.
+        // Keep the committed transaction accepted while emission recovery retries.
       } catch (restartError) {
         params.logReload.warn(
           `failed to schedule post-commit gateway restart: ${formatErrorMessage(restartError)}`,
@@ -553,7 +550,7 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
             throw err;
           }
           scheduleRecoveryRestart("plugin runtime reload", err);
-          return;
+          return "restart-required";
         }
         if (pluginReloadResult.cancelled) {
           pluginReloadAborted = true;
@@ -609,7 +606,7 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
         throw err;
       }
       scheduleRecoveryRestart("runtime commit", err);
-      return;
+      return "restart-required";
     }
 
     try {
@@ -621,7 +618,7 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
       });
     } catch (err) {
       scheduleRecoveryRestart("prepared model runtime reload", err);
-      return;
+      return "restart-required";
     }
 
     if (plan.restartHealthMonitor) {
@@ -720,6 +717,7 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
     } else if (plan.noopPaths.length > 0) {
       params.logReload.info(`config change applied (dynamic reads: ${plan.noopPaths.join(", ")})`);
     }
+    return recoveryRestartScheduled ? "restart-required" : "applied";
   };
 
   return {

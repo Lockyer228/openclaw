@@ -82,6 +82,7 @@ import {
   type GatewayReloadPlan,
 } from "./config-reload-plan.js";
 import { shouldRewarmProviderAuthState } from "./config-reload-recovery.js";
+import type { GatewayHotReloadApplicationStatus } from "./config-reload-status.types.js";
 import { applyHookMappings } from "./hooks-mapping.js";
 import { commitHooksConfigReload } from "./hooks.js";
 import { createLazyGatewayCronState } from "./server-cron-lazy.js";
@@ -1360,7 +1361,7 @@ describe("gateway hot reload model state", () => {
         expect(abortSignal.aborted).toBe(false);
         releaseReconciliation.resolve();
         if (publishes) {
-          await expect(reload).resolves.toBeUndefined();
+          await expect(reload).resolves.toBe("applied");
         } else {
           await expect(reload).rejects.toThrow("cron monitor");
         }
@@ -1675,7 +1676,7 @@ describe("gateway hot reload model state", () => {
     expect(setState).not.toHaveBeenCalled();
 
     releaseReconciliation();
-    await expect(reload).resolves.toBeUndefined();
+    await expect(reload).resolves.toBe("applied");
     expect(heartbeatRunner.updateConfig).toHaveBeenCalledWith(nextConfig);
     expect(setState).toHaveBeenCalledOnce();
   });
@@ -1716,7 +1717,7 @@ describe("gateway hot reload model state", () => {
           isCurrent: () => true,
           publish: async (commit) => await commit(),
         }),
-      ).resolves.toBeUndefined();
+      ).resolves.toBe("applied");
 
       await waitForFast(() => expect(reconcileHeartbeatJobs).toHaveBeenCalledWith(nextConfig));
       expect(heartbeatRunner.updateConfig).not.toHaveBeenCalled();
@@ -1786,7 +1787,7 @@ describe("gateway hot reload model state", () => {
 
       await expect(
         applyHotReload(createCronRestartPlan(), { cron: { enabled: true } }),
-      ).resolves.toBeUndefined();
+      ).resolves.toBe("restart-required");
 
       expect(setState).toHaveBeenCalledOnce();
       await waitForFast(() => expect(signalSpy).toHaveBeenCalledOnce());
@@ -1864,7 +1865,7 @@ describe("gateway hot reload model state", () => {
             isCurrent: () => true,
           },
         ),
-      ).resolves.toBeUndefined();
+      ).resolves.toBe("restart-required");
 
       expect(publish).toHaveBeenCalledOnce();
       expect(setState).toHaveBeenCalledOnce();
@@ -2352,7 +2353,7 @@ describe("gateway hot reload superseded tail recovery", () => {
       await entered.promise;
       pendingConfig = invalidConfigB;
       release.resolve();
-      await expect(reloadA).resolves.toBeUndefined();
+      await expect(reloadA).resolves.toBe("applied");
 
       expect(requestRecoveryRestart).not.toHaveBeenCalled();
       expect(logReload.warn).toHaveBeenCalledWith(
@@ -3378,10 +3379,10 @@ describe("gateway channel hot reload handlers", () => {
     });
   }
 
-  async function withChannelReloadsEnabled(run: () => Promise<void>) {
+  async function withChannelReloadsEnabled<T>(run: () => Promise<T>): Promise<T> {
     const restoreChannelReloadEnv = enableChannelReloadsForTest();
     try {
-      await run();
+      return await run();
     } finally {
       restoreChannelReloadEnv();
     }
@@ -3445,7 +3446,7 @@ describe("gateway channel hot reload handlers", () => {
     const { applyHotReload } = createReloadHandlersForTest(undefined, channels);
     const root = tryBeginGatewayRootWorkAdmission();
     expect(root).not.toBeNull();
-    let reload: Promise<void> | undefined;
+    let reload: Promise<GatewayHotReloadApplicationStatus> | undefined;
 
     try {
       await root?.run(async () => {
@@ -3669,7 +3670,7 @@ describe("gateway channel hot reload handlers", () => {
     const logReload = { info: vi.fn(), warn: vi.fn() };
     const { applyHotReload } = createReloadHandlersForTest(logReload, channels, reloadPlugins);
     vi.useFakeTimers();
-    let reload: Promise<void> | undefined;
+    let reload: Promise<GatewayHotReloadApplicationStatus> | undefined;
 
     try {
       await withChannelReloadsEnabled(async () => {
@@ -3811,7 +3812,7 @@ describe("gateway channel hot reload handlers", () => {
       await withChannelReloadsEnabled(async () => {
         await expect(
           applyHotReload(createChannelReloadPlan(["telegram", "discord"]), {}),
-        ).resolves.toBeUndefined();
+        ).resolves.toBe("restart-required");
       });
       expect(signalSpy).toHaveBeenCalledOnce();
     });
@@ -3876,7 +3877,7 @@ describe("gateway Gmail hot reload handlers", () => {
 
       await expect(
         applyHotReload(createGmailReloadPlan(), createGmailConfig("next@example.com")),
-      ).resolves.toBeUndefined();
+      ).resolves.toBe("restart-required");
 
       expect(stopPostReadySidecars).toHaveBeenCalledOnce();
       expect(setState).toHaveBeenCalledOnce();
@@ -5822,7 +5823,7 @@ describe("gateway plugin hot reload handlers", () => {
             isCurrent: () => true,
           },
         ),
-      ).resolves.toBeUndefined();
+      ).resolves.toBe("restart-required");
 
       expect(handlers.setState).toHaveBeenCalledTimes(1);
       expect(logReload.warn).toHaveBeenCalledWith(
@@ -5853,7 +5854,7 @@ describe("gateway plugin hot reload handlers", () => {
           { plugins: { enabled: true } },
           { sourceConfig: { plugins: { enabled: true } }, publish, isCurrent: () => true },
         ),
-      ).resolves.toBeUndefined();
+      ).resolves.toBe("restart-required");
 
       expect(publish).toHaveBeenCalledOnce();
       expect(handlers.setState).toHaveBeenCalledTimes(1);
@@ -6526,7 +6527,7 @@ describe("deferred channel reload abort generation", () => {
       // Drain active work → should proceed to stop/start channels normally
       hoisted.activeTaskBlockers.length = 0;
       await vi.advanceTimersByTimeAsync(500); // wake up, see active=0, drain complete
-      await expect(reloadPromise).resolves.toBeUndefined();
+      await expect(reloadPromise).resolves.toBe("applied");
 
       expect(channels.stop).toHaveBeenCalledWith("whatsapp", undefined, { manual: false });
       expect(channels.start).toHaveBeenCalledWith("whatsapp");

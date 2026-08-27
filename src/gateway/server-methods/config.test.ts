@@ -233,7 +233,7 @@ describe("config.patch application settlement", () => {
     );
   });
 
-  it.each(["superseded", "failed", "unclaimed"] as const)(
+  it.each(["restart-required", "superseded", "failed", "unclaimed"] as const)(
     "reports a persisted write whose runtime application was %s",
     async (outcome) => {
       const queueFollowUp = vi.fn();
@@ -257,6 +257,15 @@ describe("config.patch application settlement", () => {
         expect.objectContaining({
           code: "UNAVAILABLE",
           message: expect.stringContaining("persisted but was not applied"),
+        }),
+      );
+      expect(harness.respond).toHaveBeenCalledWith(
+        false,
+        undefined,
+        expect.objectContaining({
+          message: expect.stringContaining(
+            outcome === "restart-required" ? "Gateway is restarting" : "use config.apply",
+          ),
         }),
       );
       expect(queueFollowUp).toHaveBeenCalledOnce();
