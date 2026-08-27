@@ -313,7 +313,10 @@ export class WorkspaceVanishedError extends Error {
   }
 }
 
-export async function writeFileIfMissing(filePath: string, content: string): Promise<boolean> {
+export async function writeFileIfMissing(
+  filePath: string,
+  content: string | Buffer,
+): Promise<boolean> {
   const dir = path.dirname(filePath);
   const name = path.basename(filePath);
   const workspaceRoot = await fsSafeRoot(dir, {
@@ -759,7 +762,11 @@ export async function seedWorkspaceBootstrap(params: {
   await fs.mkdir(dir, { recursive: true });
   let created = false;
   if (!bootstrapExists) {
-    created = await writeFileIfMissing(bootstrapPath, text);
+    // Write the raw consented bytes (the Buffer may carry a UTF-8 BOM that the
+    // existing-winner byte-equality check below compares against), not the
+    // decoded text — TextDecoder would strip a leading BOM and make the
+    // persisted bytes differ from the approved Claw bootstrap.
+    created = await writeFileIfMissing(bootstrapPath, params.content);
   }
 
   if (!created) {
