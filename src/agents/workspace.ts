@@ -15,7 +15,9 @@ import {
   isRootFileMissingFailure,
   openRootFileFollowingParents,
 } from "../infra/boundary-file-read.js";
-import { sameFileIdentity, type FileIdentityStat } from "../infra/fs-safe-advanced.js";
+import { isHardlinkFallbackError } from "../infra/directory-durability.js";
+import { hasErrnoCode } from "../infra/errno.js";
+import { sameFileIdentity, tempFile, type FileIdentityStat } from "../infra/fs-safe-advanced.js";
 import { FsSafeError, pathExists, root as fsSafeRoot } from "../infra/fs-safe.js";
 import { isPathInside } from "../infra/path-guards.js";
 import { retryAsync } from "../infra/retry.js";
@@ -313,29 +315,67 @@ export class WorkspaceVanishedError extends Error {
   }
 }
 
-export async function writeFileIfMissing(
+export async function publishBootstrapFile(
   filePath: string,
   content: string | Buffer,
 ): Promise<boolean> {
-  const dir = path.dirname(filePath);
-  const name = path.basename(filePath);
-  const workspaceRoot = await fsSafeRoot(dir, {
-    hardlinks: "reject",
-    maxBytes: MAX_WORKSPACE_BOOTSTRAP_FILE_BYTES,
-    symlinks: "reject",
+  const dir = await fs.realpath(path.dirname(filePath));
+  let cleanupError: unknown;
+  const staging = await tempFile({
+    rootDir: dir,
+    prefix: "openclaw-bootstrap",
+    fileName: path.basename(filePath),
+    onCleanupError: (error) => {
+      cleanupError = error;
+    },
   });
+  let outcome: { kind: "created" } | { kind: "exists" } | { kind: "failed"; error: unknown };
   try {
-    await workspaceRoot.write(name, content, { overwrite: false, mode: 0o666 });
-    return true;
-  } catch (error) {
-    const alreadyExists =
-      (error as NodeJS.ErrnoException).code === "EEXIST" ||
-      (error instanceof FsSafeError && error.code === "already-exists");
-    if (alreadyExists) {
-      return false;
+    await fs.writeFile(staging.path, content, { flag: "wx", flush: true });
+    let linked = false;
+    try {
+      const targetPath = path.join(dir, path.basename(filePath));
+      // No await may split these operations: safe readers reject the temporary
+      // two-link inode, so publication must reach one link in the same turn.
+      syncFs.linkSync(staging.path, targetPath);
+      linked = true;
+      syncFs.unlinkSync(staging.path);
+      outcome = { kind: "created" };
+    } catch (error) {
+      if (!linked && hasErrnoCode(error, "EEXIST")) {
+        outcome = { kind: "exists" };
+      } else if (!linked && isHardlinkFallbackError(error)) {
+        outcome = {
+          kind: "failed",
+          error: new Error(
+            "Workspace filesystem does not support atomic bootstrap publication. Use a workspace on a filesystem with hard-link support.",
+            { cause: error },
+          ),
+        };
+      } else {
+        outcome = { kind: "failed", error };
+      }
     }
-    throw error;
+  } catch (error) {
+    outcome = { kind: "failed", error };
   }
+  await staging.cleanup();
+  if (cleanupError !== undefined) {
+    if (outcome.kind !== "failed") {
+      throw new Error("Workspace bootstrap staging cleanup failed after publication.", {
+        cause: cleanupError,
+      });
+    }
+    throw new AggregateError(
+      [outcome.error, cleanupError],
+      "Workspace bootstrap publication and staging cleanup failed. Remove the incomplete staging directory, then retry.",
+      { cause: cleanupError },
+    );
+  }
+  if (outcome.kind === "failed") {
+    throw outcome.error;
+  }
+  return outcome.kind === "created";
 }
 
 function isTransientWorkspaceReadError(error: unknown): boolean {
@@ -760,13 +800,26 @@ export async function seedWorkspaceBootstrap(params: {
   }
 
   await fs.mkdir(dir, { recursive: true });
+  const workspaceRoot = await fsSafeRoot(dir, {
+    hardlinks: "reject",
+    maxBytes: MAX_WORKSPACE_BOOTSTRAP_FILE_BYTES,
+    symlinks: "reject",
+  });
   let created = false;
   if (!bootstrapExists) {
-    // Write the raw consented bytes (the Buffer may carry a UTF-8 BOM that the
-    // existing-winner byte-equality check below compares against), not the
-    // decoded text — TextDecoder would strip a leading BOM and make the
-    // persisted bytes differ from the approved Claw bootstrap.
-    created = await writeFileIfMissing(bootstrapPath, params.content);
+    try {
+      await workspaceRoot.write(DEFAULT_BOOTSTRAP_FILENAME, params.content, {
+        overwrite: false,
+      });
+      created = true;
+    } catch (error) {
+      const alreadyExists =
+        (error as NodeJS.ErrnoException).code === "EEXIST" ||
+        (error instanceof FsSafeError && error.code === "already-exists");
+      if (!alreadyExists) {
+        throw error;
+      }
+    }
   }
 
   if (!created) {
@@ -1064,15 +1117,15 @@ export async function ensureAgentWorkspace(params?: {
   const shouldWriteBootstrapFile = (fileName: string): boolean =>
     !OPTIONAL_BOOTSTRAP_FILENAMES.has(fileName) || !skipOptionalBootstrapFiles.has(fileName);
 
-  await writeFileIfMissing(agentsPath, agentsTemplate);
+  await publishBootstrapFile(agentsPath, agentsTemplate);
   if (shouldWriteBootstrapFile(DEFAULT_SOUL_FILENAME)) {
-    await writeFileIfMissing(soulPath, soulTemplate);
+    await publishBootstrapFile(soulPath, soulTemplate);
   }
   const identityPathCreated = shouldWriteBootstrapFile(DEFAULT_IDENTITY_FILENAME)
-    ? await writeFileIfMissing(identityPath, identityTemplate)
+    ? await publishBootstrapFile(identityPath, identityTemplate)
     : false;
   if (shouldWriteBootstrapFile(DEFAULT_USER_FILENAME)) {
-    await writeFileIfMissing(userPath, userTemplate);
+    await publishBootstrapFile(userPath, userTemplate);
   }
 
   let state = readCanonicalWorkspaceStateSnapshot(dir).setup;
@@ -1122,7 +1175,7 @@ export async function ensureAgentWorkspace(params?: {
       markState({ setupCompletedAt: nowIso() });
     } else {
       const bootstrapTemplate = await loadTemplate(DEFAULT_BOOTSTRAP_FILENAME);
-      const wroteBootstrap = await writeFileIfMissing(bootstrapPath, bootstrapTemplate);
+      const wroteBootstrap = await publishBootstrapFile(bootstrapPath, bootstrapTemplate);
       if (!wroteBootstrap) {
         bootstrapExists = await pathExists(bootstrapPath);
       } else {
