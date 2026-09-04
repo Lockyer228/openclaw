@@ -7,6 +7,7 @@ import { afterAll, beforeEach, describe, expect, onTestFinished, test, vi } from
 import { writeAcpSessionMetaForMigration } from "../acp/runtime/session-meta.js";
 import { resolveExecDefaults } from "../agents/exec-defaults.js";
 import { resolveLegacyInheritedAuthAgentId } from "../agents/legacy-inherited-auth-dir.js";
+import * as sessionModelRefs from "../agents/session-model-ref.js";
 import { SESSION_PERMISSION_BY_EXEC_MODE } from "../agents/session-permission-exec-mode.js";
 import { resetConfigRuntimeState, setRuntimeConfigSnapshot } from "../config/config.js";
 import type { OpenClawConfig } from "../config/config.js";
@@ -42,12 +43,11 @@ import {
   projectSessionPatchResult,
   resolveGatewayModelSupportsImages,
 } from "./session-utils-model.js";
-import {
-  buildSessionListRowContext,
-  buildSingleRowStoreChildSessionsByKey,
-} from "./session-utils-projection.js";
+import { buildSessionListRowMetadataContext } from "./session-utils-projection.js";
 import { buildGatewaySessionRow as buildGatewaySessionRowOwner } from "./session-utils-row.js";
+import { resolveSessionListSearchModelFields } from "./session-utils-search.js";
 import {
+  type GatewaySessionStoreDiscoveryCache,
   resolveGatewaySessionStoreTarget,
   resolveGatewaySessionStoreTargetWithStore,
 } from "./session-utils-store-lookup.js";
@@ -265,8 +265,7 @@ function buildGatewaySessionRow(
   params: Parameters<typeof buildGatewaySessionRowOwner>[0],
 ): ReturnType<typeof buildGatewaySessionRowOwner> {
   const entry = params.entry ?? ({} as SessionEntry);
-  const rowContext = buildSessionListRowContext({
-    store: params.store,
+  const rowContext = buildSessionListRowMetadataContext({
     now: params.now ?? Date.now(),
   });
   // Row projection tests do not own ACP persistence. Mark the supplied fixture
@@ -624,7 +623,12 @@ describe("gateway session utils", () => {
     const store: Record<string, SessionEntry> = {
       recent: { sessionId: "recent", updatedAt: 30 },
       pinned: { sessionId: "pinned", updatedAt: 10, pinnedAt: 40 },
-      archived: { sessionId: "archived", updatedAt: 20, archivedAt: 50 },
+      archived: {
+        sessionId: "archived",
+        updatedAt: 20,
+        archivedAt: 50,
+        archiveReason: "active-session-cap",
+      },
     } satisfies Record<string, SessionEntry>;
 
     const active = await listSessionsFromStoreAsync({ cfg, storePath: "", store, opts: {} });
@@ -642,7 +646,13 @@ describe("gateway session utils", () => {
       opts: { archived: true },
     });
     expect(archived.sessions).toMatchObject([
-      { key: "archived", archived: true, archivedAt: 50, pinned: false },
+      {
+        key: "archived",
+        archived: true,
+        archivedAt: 50,
+        archiveReason: "active-session-cap",
+        pinned: false,
+      },
     ]);
 
     const all = await listSessionsFromStoreAsync({
@@ -1201,12 +1211,14 @@ describe("gateway session utils", () => {
         {
           sessionId: `session-${index}`,
           modelProvider: "openai",
-          model: "gpt-5.5",
+          model: "previous-model",
           updatedAt: Date.now() - index,
         } satisfies SessionEntry,
       ]),
     );
 
+    const historicalModel = vi.spyOn(sessionModelRefs, "resolveSessionModelIdentityRef");
+    onTestFinished(() => historicalModel.mockRestore());
     const result = await listSessionsFromStoreAsync({
       cfg,
       storePath: "",
@@ -1215,6 +1227,10 @@ describe("gateway session utils", () => {
     });
 
     expect(result.sessions).toHaveLength(5);
+    for (const row of result.sessions) {
+      expect(row).toMatchObject({ modelProvider: "openai", model: "gpt-5.5" });
+    }
+    expect(historicalModel).not.toHaveBeenCalled();
     const missingMediumLevelSessionIds = result.sessions
       .filter((session) => !session.thinkingLevels?.some((level) => level.id === "medium"))
       .map((session) => session.sessionId);
@@ -1437,6 +1453,108 @@ describe("gateway session utils", () => {
     });
     expect(JSON.stringify(result.entry)).not.toContain("thinkingLevelSelection");
   });
+
+  test.each([true, false])(
+    "projects the private native model instead of outer or observed guesses (lightweight=%s)",
+    (lightweightListRow) => {
+      const cfg = createModelDefaultsConfig({ primary: "openai/gpt-5.6-sol" });
+      const entry = (sessionId: string): InternalSessionEntry => ({
+        sessionId,
+        updatedAt: 1,
+        agentHarnessId: "test-native",
+        modelSelectionLocked: true,
+        modelProvider: "stale-provider",
+        model: "stale-model",
+      });
+      const nativeKey = "agent:main:harness:test-native:native";
+      const hostAuthKey = "agent:main:harness:test-native:host-auth";
+      const unprovenKey = "agent:main:harness:test-native:unproven";
+      const concreteKey = "agent:main:concrete";
+      const native = entry("native-model-row");
+      const hostAuth = entry("host-auth-model-row");
+      const unproven = entry("unproven-model-row");
+      const concrete: InternalSessionEntry = {
+        ...entry("concrete-model-row"),
+        pluginOwnerId: "test-native",
+        providerOverride: "openai",
+        modelOverride: "gpt-5.6-sol",
+      };
+      const store = {
+        [nativeKey]: native,
+        [hostAuthKey]: hostAuth,
+        [unprovenKey]: unproven,
+        [concreteKey]: concrete,
+      };
+      const bindings = new Map<
+        string,
+        { sessionId: string; auth: "native" | "host"; model: string }
+      >([
+        [
+          nativeKey,
+          { sessionId: native.sessionId, auth: "native" as const, model: "gpt-5.6-luna" },
+        ],
+        [
+          hostAuthKey,
+          { sessionId: hostAuth.sessionId, auth: "host" as const, model: "gpt-5.6-sol" },
+        ],
+      ]);
+      const registry = createEmptyPluginRegistry();
+      registry.agentHarnesses.push({
+        pluginId: "test-native",
+        source: "test",
+        harness: {
+          id: "test-native",
+          label: "Native session model owner",
+          supports: () => ({ supported: true }),
+          runAttempt: async () => {
+            throw new Error("session rows must not start a model turn");
+          },
+          resolveSessionRuntimeOwnership: (params) => {
+            params.assertCurrent();
+            const binding = params.sessionKey ? bindings.get(params.sessionKey) : undefined;
+            return binding?.sessionId === params.sessionId
+              ? {
+                  model: "native" as const,
+                  auth: binding.auth,
+                  modelRef: { provider: "openai", model: binding.model },
+                }
+              : undefined;
+          },
+        },
+      });
+      setTestActivePluginRegistry(registry);
+      const rowContext = buildSessionListRowMetadataContext({ now: 1 });
+      for (const current of Object.values(store)) {
+        rowContext.acpSessionMetaByEntry.set(current, undefined);
+      }
+      const readRow = (key: keyof typeof store) =>
+        buildGatewaySessionRowOwner({
+          cfg,
+          storePath: "",
+          store,
+          key,
+          entry: store[key],
+          rowContext,
+          lightweightListRow,
+          skipTranscriptUsageFallback: true,
+        });
+      const nativeRow = readRow(nativeKey);
+      expect(nativeRow).toMatchObject({ modelProvider: "openai", model: "gpt-5.6-luna" });
+      expect(
+        resolveSessionListSearchModelFields({ cfg, key: nativeKey, entry: native, rowContext }),
+      ).toContain("openai/gpt-5.6-luna");
+      expect(buildGatewaySessionEventFields({ sessionRow: nativeRow })).toMatchObject({
+        modelProvider: "openai",
+        model: "gpt-5.6-luna",
+      });
+      expect(readRow(hostAuthKey)).toMatchObject({ modelProvider: "openai", model: "gpt-5.6-sol" });
+      expect(readRow(concreteKey)).toMatchObject({ modelProvider: "openai", model: "gpt-5.6-sol" });
+      expect(readRow(unprovenKey)).toMatchObject({ modelProvider: "openai", model: "gpt-5.6-sol" });
+      expect(native.model).toBe("stale-model");
+      bindings.delete(nativeKey);
+      expect(readRow(nativeKey)).toMatchObject({ modelProvider: "openai", model: "gpt-5.6-sol" });
+    },
+  );
 
   test("reports observed locked runtime from agentHarnessId instead of configured intent", () => {
     const cfg = {
@@ -3276,6 +3394,43 @@ describe("gateway session utils", () => {
     }
   });
 
+  test("loadGatewaySessionEntryReadOnly discovers stores once but reads changed rows live", async () => {
+    resetConfigRuntimeState();
+    try {
+      await withStateDirEnv("session-utils-request-discovery-", async ({ stateDir }) => {
+        const storePath = path.join(stateDir, "agents", "main", "sessions", "sessions.json");
+        const cfg = {
+          session: { mainKey: "main", store: storePath },
+          agents: { entries: { main: {} } },
+        } satisfies OpenClawConfig;
+        const sessionKey = "agent:main:main";
+        await seedSessionEntries(storePath, {
+          [sessionKey]: { sessionId: "session-before", updatedAt: 1 },
+        });
+        setRuntimeConfigSnapshot(cfg, cfg);
+        const targetDiscoveryCache: GatewaySessionStoreDiscoveryCache = new Map();
+        const discoveryWrites = vi.spyOn(targetDiscoveryCache, "set");
+        try {
+          const first = loadGatewaySessionEntryReadOnly(sessionKey, { targetDiscoveryCache });
+          await replaceSessionEntry(
+            { sessionKey, storePath },
+            { sessionId: "session-after", updatedAt: 2 },
+          );
+          const second = loadGatewaySessionEntryReadOnly(sessionKey, { targetDiscoveryCache });
+
+          expect(first.entry?.sessionId).toBe("session-before");
+          expect(second.entry?.sessionId).toBe("session-after");
+          expect(targetDiscoveryCache.size).toBe(1);
+          expect(discoveryWrites).toHaveBeenCalledTimes(1);
+        } finally {
+          discoveryWrites.mockRestore();
+        }
+      });
+    } finally {
+      resetConfigRuntimeState();
+    }
+  });
+
   test("loadGatewaySessionEntryReadOnly clones only the selected row and direct children", async () => {
     resetConfigRuntimeState();
     try {
@@ -3331,38 +3486,6 @@ describe("gateway session utils", () => {
     } finally {
       resetConfigRuntimeState();
     }
-  });
-
-  test("single-row child candidates reuse stable entry identities across sparse stores", () => {
-    const parentKey = "agent:main:main";
-    let spawnedByReads = 0;
-    const parent = { sessionId: "parent", updatedAt: 1 } as SessionEntry;
-    const child = {
-      sessionId: "child",
-      updatedAt: Date.now(),
-      get spawnedBy() {
-        spawnedByReads += 1;
-        return parentKey;
-      },
-    } as SessionEntry;
-    const storePath = "/tmp/openclaw-single-row-child-cache";
-
-    const first = buildSingleRowStoreChildSessionsByKey({
-      store: { [parentKey]: parent, "agent:main:child": child },
-      storePath,
-      key: parentKey,
-      now: Date.now(),
-    });
-    const second = buildSingleRowStoreChildSessionsByKey({
-      store: { [parentKey]: parent, "agent:main:child": child },
-      storePath,
-      key: parentKey,
-      now: Date.now(),
-    });
-
-    expect(first.get(parentKey)).toEqual(["agent:main:child"]);
-    expect(second.get(parentKey)).toEqual(["agent:main:child"]);
-    expect(spawnedByReads).toBe(1);
   });
 
   test("loadGatewaySessionEntryReadOnly rejects a persisted main alias", async () => {

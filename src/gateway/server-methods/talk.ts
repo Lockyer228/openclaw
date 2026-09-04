@@ -245,6 +245,8 @@ function buildTalkTtsConfig(
 }
 
 function buildTalkCatalog(config: OpenClawConfig) {
+  // Reject ambiguous ownership before provider discovery loads unrelated plugins.
+  const realtimeAgentId = resolveTalkSessionAgentId(config);
   const talkResolved = resolveActiveTalkProviderConfig(config.talk);
   const activeSpeechProvider = canonicalizeSpeechProviderId(talkResolved?.provider, config);
   const transcriptionConfig = buildTalkTranscriptionConfig(config);
@@ -260,12 +262,12 @@ function buildTalkCatalog(config: OpenClawConfig) {
   );
   const activeTranscriptionProvider = transcriptionSelection.activeProvider;
   const realtimeConfig = buildTalkRealtimeConfig(config);
+  const realtimeProviderIds = Object.keys(realtimeConfig.providers);
   const realtimeSurface =
     realtimeConfig.transport === "gateway-relay" ? "gateway-relay" : "browser-session";
   // Mirror talk.client.create's resolution inputs (agent scope + top-level model
   // override) so catalog readiness matches what session creation will actually do;
   // diverging here previously reported GPT-Live over OAuth as unconfigured.
-  const realtimeAgentId = resolveTalkSessionAgentId(config);
   const realtimeModelOverride = realtimeConfig.model
     ? { providerConfigOverrides: { model: realtimeConfig.model } }
     : {};
@@ -363,6 +365,9 @@ function buildTalkCatalog(config: OpenClawConfig) {
           transports: ["gateway-relay"],
           brains: ["none"],
         };
+        if (provider.models?.length) {
+          entry.models = [...provider.models];
+        }
         if (provider.defaultModel) {
           entry.defaultModel = provider.defaultModel;
         }
@@ -375,11 +380,12 @@ function buildTalkCatalog(config: OpenClawConfig) {
     realtime: {
       ready: realtimeSelection.ready,
       ...(activeRealtimeProvider ? { activeProvider: activeRealtimeProvider } : {}),
-      providers: listRealtimeVoiceProviders(config).map((provider) => {
+      providers: listRealtimeVoiceProviders(config, realtimeProviderIds).map((provider) => {
         const available = isSecretOwnerAvailable("capability", "talk:realtime");
         const rawConfig = resolveProviderRawConfig({
           providerConfigs: realtimeConfig.providers ?? {},
           providerId: provider.id,
+          providerAliases: provider.aliases,
           configuredProviderId:
             provider.id === activeRealtimeProvider ? realtimeConfig.provider : undefined,
         });
@@ -443,7 +449,9 @@ function buildTalkCatalog(config: OpenClawConfig) {
           entry.transports = [...capabilities.transports];
         }
         if (capabilities?.inputAudioFormats) {
-          entry.inputAudioFormats = capabilities.inputAudioFormats.map((format) => ({ ...format }));
+          entry.inputAudioFormats = capabilities.inputAudioFormats.map((format) => ({
+            ...format,
+          }));
         }
         if (capabilities?.outputAudioFormats) {
           entry.outputAudioFormats = capabilities.outputAudioFormats.map((format) => ({

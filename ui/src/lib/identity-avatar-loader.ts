@@ -1,5 +1,9 @@
 import { AVATAR_MAX_BYTES } from "../../../src/shared/avatar-limits.js";
-import { readAvatarGatewayContext, registerAvatarGatewayReset } from "./identity-avatar-context.ts";
+import {
+  fetchGatewayContextResource,
+  readAvatarGatewayContext,
+  registerAvatarGatewayReset,
+} from "./identity-avatar-context.ts";
 import { resolveTrustedAvatarUrl } from "./identity-avatar.ts";
 
 const IDENTITY_AVATAR_CACHE_MAX_ENTRIES = 128;
@@ -34,23 +38,18 @@ function clearIdentityAvatarCache(): void {
 // the owning Gateway or credential context changes.
 registerAvatarGatewayReset(clearIdentityAvatarCache);
 
-function trimIdentityAvatarCache(protectedEntry?: CachedIdentityAvatar): void {
-  while (identityAvatarCache.size > IDENTITY_AVATAR_CACHE_MAX_ENTRIES) {
-    let evicted = false;
-    for (const [key, entry] of identityAvatarCache) {
-      // Pending consumers still need their eventual blob. Only completed LRU
-      // entries may be evicted; the request currently resolving stays valid.
-      if (!entry.blobUrl || !entry.loaded || entry === protectedEntry) {
-        continue;
-      }
-      identityAvatarCache.delete(key);
-      URL.revokeObjectURL(entry.blobUrl);
-      evicted = true;
+function trimIdentityAvatarCache(): void {
+  for (const [key, entry] of identityAvatarCache) {
+    if (identityAvatarCache.size <= IDENTITY_AVATAR_CACHE_MAX_ENTRIES) {
       break;
     }
-    if (!evicted) {
-      break;
+    // Pending consumers still need their eventual blob. Only settled images
+    // may be evicted, in the Map's LRU order.
+    if (!entry.blobUrl || !entry.loaded) {
+      continue;
     }
+    identityAvatarCache.delete(key);
+    URL.revokeObjectURL(entry.blobUrl);
   }
 }
 
@@ -69,14 +68,9 @@ function loadIdentityAvatar(url: string): string | Promise<string | null> {
     loaded: false,
     promise: Promise.resolve(null),
   };
-  const { authHeader } = readAvatarGatewayContext();
   entry.promise = (async () => {
     try {
-      const response = await fetch(url, {
-        credentials: "include",
-        ...(authHeader ? { headers: { Authorization: authHeader } } : {}),
-        signal: AbortSignal.timeout(IDENTITY_AVATAR_FETCH_TIMEOUT_MS),
-      });
+      const response = await fetchGatewayContextResource(url, IDENTITY_AVATAR_FETCH_TIMEOUT_MS);
       if (!response.ok) {
         return null;
       }
@@ -96,7 +90,7 @@ function loadIdentityAvatar(url: string): string | Promise<string | null> {
         return null;
       }
       entry.blobUrl = blobUrl;
-      trimIdentityAvatarCache(entry);
+      trimIdentityAvatarCache();
       return blobUrl;
     } catch {
       return null;
@@ -108,22 +102,20 @@ function loadIdentityAvatar(url: string): string | Promise<string | null> {
     }
   })();
   identityAvatarCache.set(url, entry);
-  trimIdentityAvatarCache(entry);
+  trimIdentityAvatarCache();
   return entry.promise;
 }
 
 /** Fetch connected-gateway profile images once and render CSP-safe blobs. */
 export function resolveAvatarImageUrl(value: string): string | Promise<string | null> | null {
-  const { authHeader, origin, resourceBasePath } = readAvatarGatewayContext();
+  const { authTokens, origin, resourceBasePath } = readAvatarGatewayContext();
   const trusted = resolveTrustedAvatarUrl(value, origin, resourceBasePath);
   if (!trusted) {
     return null;
   }
   // Connected same-origin routes need the loader too: it resolves a missing
   // avatar before Lit can reconcile an <img> error back over its initials.
-  const pageOrigin = globalThis.location?.origin;
-  const crossOrigin = pageOrigin ? new URL(trusted, pageOrigin).origin !== pageOrigin : false;
-  return origin || authHeader || crossOrigin ? loadIdentityAvatar(trusted) : trusted;
+  return origin || authTokens.length ? loadIdentityAvatar(trusted) : trusted;
 }
 
 /** A blob stays live until its image has finished loading or definitively failed. */

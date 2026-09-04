@@ -7,7 +7,7 @@ import {
 } from "../../infra/agent-run-registry.js";
 import { NODE_WORKER_DESKTOP_COMPUTER_COMMAND } from "../../infra/node-commands.js";
 import { parseComputerUseCapabilityDescriptor } from "../../plugins/computer-use-contract.js";
-import { getActivePluginGatewayNodePolicyRegistry } from "../../plugins/runtime.js";
+import { getActivePluginGatewayNodePolicyRegistry } from "../../plugins/runtime-state.js";
 import type { WorkerComputerLaunchDescriptor } from "../../worker/launch-descriptor.js";
 import { parseNodeWorkerComputerInput } from "../../worker/node-computer-protocol.js";
 import type { AgentRuntimeIdentity } from "../agent-runtime-identity-token.js";
@@ -18,6 +18,7 @@ import type { NodeWorkerSupervisorTransport } from "../node-registry-private.js"
 import type { GatewayContextResolver } from "../server-methods/types.js";
 import type { WorkerSessionPlacementStore, WorkerSessionTurnClaim } from "./placement-store.js";
 import type { WorkerEnvironmentStore } from "./store.js";
+import { WorkerRunnerUnavailableError } from "./tunnel-contract.js";
 import type { WorkerComputerExecutor } from "./worker-turn-computer-rpc.js";
 
 const COMPUTER_COMMANDS = ["screen.snapshot", "computer.act"] as const;
@@ -68,7 +69,7 @@ export function createWorkerComputerTransportOwner(options: {
     }
     const node = context.nodeRegistry.get(environment.nodeDeviceId);
     if (!node) {
-      throw new Error("Session desktop node is disconnected");
+      throw new WorkerRunnerUnavailableError();
     }
     const environmentIsCurrent = () => {
       const current = options.store.get(environment.environmentId);

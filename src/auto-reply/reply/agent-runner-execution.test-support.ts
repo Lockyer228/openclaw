@@ -5,6 +5,7 @@ import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js"
 import { testing as cliBackendsTesting } from "../../agents/cli-backends.test-support.js";
 import type { runEmbeddedAgentEntry } from "../../agents/embedded-agent-runner/run-entry.js";
 import type { DeferredEmbeddedRunLifecycleOwner } from "../../agents/embedded-agent-runner/run/deferred-lifecycle-owner.js";
+import type { RunEmbeddedAgentInternalParams } from "../../agents/embedded-agent-runner/run/internal-params.js";
 import type { EmbeddedAgentRunResult } from "../../agents/embedded-agent-runner/types.js";
 import { FailoverError, type FallbackAttemptRecord } from "../../agents/failover-error.js";
 import { AUTH_INVALID_TOKEN_USER_TEXT } from "../../agents/failover/user-copy.js";
@@ -189,7 +190,6 @@ vi.mock("../../agents/embedded-agent-helpers.js", async () => {
     isContextOverflowError: (message?: string) => state.isContextOverflowErrorMock(message),
     isLikelyContextOverflowError: (message?: string) =>
       state.isLikelyContextOverflowErrorMock(message),
-    isTransientHttpError: () => false,
     sanitizeUserFacingText: (text?: string) => text ?? "",
   };
 });
@@ -400,6 +400,7 @@ export type EmbeddedAgentParams = {
   transcriptPrompt?: string;
   lifecycleGeneration?: string;
   onDeferredLifecycleOwner?: (owner: DeferredEmbeddedRunLifecycleOwner) => void;
+  onCompactionAccounting?: RunEmbeddedAgentInternalParams["onCompactionAccounting"];
   onExecutionStarted?: (info?: { lifecycleGeneration?: string }) => void;
   onExecutionPhase?: (info: {
     phase:
@@ -601,6 +602,18 @@ export function expectBlockReplyCall(
   expectMockCallArgFields(onBlockReply, index, "block reply payload", fields);
 }
 
+/**
+ * Session-store paths reach production resolution, which derives a real agent
+ * SQLite file from the store's directory. A shared /tmp path would therefore
+ * open the machine-wide agent database and make unrelated suites depend on it.
+ */
+export function makeTestSessionStorePath(): string {
+  return path.join(
+    useAutoCleanupTempDirTracker(onTestFinished).make("openclaw-agent-execution-store-"),
+    "sessions.json",
+  );
+}
+
 export function createMinimalRunAgentTurnParams(overrides?: {
   followupRun?: FollowupRun;
   opts?: GetReplyOptions;
@@ -657,7 +670,11 @@ export function createNonDirectFailureSessionCtx(
   } as unknown as TemplateContext;
 }
 
-export function setupAgentRunnerExecutionTestState() {
+export async function setupAgentRunnerExecutionTestState() {
+  // Each suite awaits collection readiness after its imported mock harnesses register.
+  // Hook timeouts cannot cancel imports; cleanup must not overtake module readiness.
+  await getExecuteAgentTurnForTest();
+
   beforeEach(() => {
     vi.useRealTimers();
     state.runEmbeddedAgentMock.mockReset();

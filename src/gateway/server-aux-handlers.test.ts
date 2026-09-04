@@ -22,6 +22,7 @@ vi.mock("../secrets/store/secret-store.js", () => {
 });
 import {
   getRuntimeAuthProfileStoreCredentialsRevision,
+  getRuntimeAuthProfileStoreSnapshotsRevision,
   getRuntimeAuthProfileStoreSnapshotCore,
   setRuntimeAuthProfileStoreSnapshot,
 } from "../agents/auth-profiles/runtime-snapshots.js";
@@ -73,7 +74,6 @@ function createReloadPlan(overrides?: Partial<GatewayReloadPlan>): GatewayReload
     restartGmailWatcher: overrides?.restartGmailWatcher ?? false,
     restartCron: overrides?.restartCron ?? false,
     restartHeartbeat: overrides?.restartHeartbeat ?? false,
-    restartHealthMonitor: overrides?.restartHealthMonitor ?? false,
     reloadPlugins: overrides?.reloadPlugins ?? false,
     restartChannels: overrides?.restartChannels ?? new Set(),
     restartChannelAccounts: overrides?.restartChannelAccounts,
@@ -88,6 +88,7 @@ function createSnapshot(config: OpenClawConfig): PreparedSecretsRuntimeSnapshot 
     config,
     authStores: [],
     authStoreCredentialsRevision: getRuntimeAuthProfileStoreCredentialsRevision(),
+    authStoreSnapshotsRevision: getRuntimeAuthProfileStoreSnapshotsRevision(),
     warnings: [],
     webTools: {
       search: { providerSource: "none", diagnostics: [] },
@@ -229,7 +230,7 @@ function createSecretsReloadHarness(params: SecretsReloadHarnessParams) {
       params.resolveSharedGatewaySessionGenerationForConfig ?? (() => undefined),
     clients: params.clients ?? [],
     channelManager: {
-      startChannel: params.startChannel ?? (async () => {}),
+      startChannel: params.startChannel ?? (async () => new Map()),
       stopChannel: params.stopChannel ?? (async () => {}),
       isManuallyStopped: params.isManuallyStopped ?? (() => false),
       resolveRuntimeAccountId:
@@ -252,7 +253,7 @@ function createSecretsReloadHarnessWithChannelMocks(
   params: Omit<SecretsReloadHarnessParams, "startChannel" | "stopChannel">,
 ) {
   const stopChannel = vi.fn().mockResolvedValue(undefined);
-  const startChannel = vi.fn().mockResolvedValue(undefined);
+  const startChannel = vi.fn().mockResolvedValue(new Map());
   return {
     ...createSecretsReloadHarness({
       ...params,
@@ -281,6 +282,7 @@ function createCredentialReloadHarness(options: CredentialReloadHarnessOptions =
     if (options.createFailure) {
       throw options.createFailure(owner);
     }
+    return new Map();
   });
   const stopChannel = vi.fn().mockResolvedValue(undefined);
   const isManuallyStopped = vi.fn(() => options.manualStop ?? false);
@@ -443,7 +445,7 @@ describe("gateway aux handlers", () => {
       return preparedFirst;
     });
     const stopChannel = vi.fn().mockResolvedValue(undefined);
-    const startChannel = vi.fn().mockResolvedValue(undefined);
+    const startChannel = vi.fn().mockResolvedValue(new Map());
     const respond = vi.fn();
 
     const { reload } = createSecretsReloadHarness({
@@ -775,7 +777,7 @@ describe("gateway aux handlers", () => {
       .fn()
       .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error("zalo stop hook failed after socket close"));
-    const startChannel = vi.fn().mockResolvedValue(undefined);
+    const startChannel = vi.fn().mockResolvedValue(new Map());
     const logChannelsInfo = vi.fn();
 
     const { reload, respond } = createSecretsReloadHarness({

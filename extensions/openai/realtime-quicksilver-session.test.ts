@@ -157,7 +157,9 @@ describe("GPT-Live offer broker", () => {
         {
           providerConfig: {},
           model: "gpt-realtime-2.1",
+          gatewayControl: { bindBridge: vi.fn() },
           gaSession: { type: "realtime", model: "gpt-realtime-2.1" },
+          clientControl: { owner: "gateway" },
           gaSideband: {
             createBridge,
           },
@@ -244,7 +246,9 @@ describe("GPT-Live offer broker", () => {
         {
           providerConfig: {},
           model: "gpt-realtime-2.1",
+          gatewayControl: { bindBridge: vi.fn() },
           gaSession: { type: "realtime", model: "gpt-realtime-2.1" },
+          clientControl: { owner: "gateway" },
           gaSideband: {
             createBridge: () => bridge,
           },
@@ -296,7 +300,9 @@ describe("GPT-Live offer broker", () => {
         {
           providerConfig: {},
           model: "gpt-realtime-2.1",
+          gatewayControl: { bindBridge: vi.fn() },
           gaSession: { type: "realtime", model: "gpt-realtime-2.1" },
+          clientControl: { owner: "gateway" },
           gaSideband: {
             createBridge: () => bridge,
           },
@@ -343,7 +349,9 @@ describe("GPT-Live offer broker", () => {
           {
             providerConfig: {},
             model: "gpt-realtime-2.1",
+            gatewayControl: { bindBridge: vi.fn() },
             gaSession: { type: "realtime", model: "gpt-realtime-2.1" },
+            clientControl: { owner: "gateway" },
             gaSideband: {
               createBridge: vi.fn(),
             },
@@ -566,6 +574,8 @@ describe("GPT-Live offer broker", () => {
   it.each(["error", "close"] as const)(
     "fails safely when the sideband emits %s immediately after opening",
     async (terminalEvent) => {
+      const onError = vi.fn();
+      const onClose = vi.fn();
       const { realtime, sockets, logger } = createBroker({
         socketFactory: () => {
           const socket = new FakeSocket("manual");
@@ -588,6 +598,7 @@ describe("GPT-Live offer broker", () => {
             providerConfig: {},
             model: "gpt-live-1-codex",
             runAgentConsult: vi.fn(async () => ({ text: "Done" })),
+            gatewayControl: { bindBridge: vi.fn(), onError, onClose },
           },
           { type: "api-key", token: "platform-key" },
         );
@@ -600,6 +611,8 @@ describe("GPT-Live offer broker", () => {
         expect(response.res.statusCode).toBe(502);
         expect(response.readBody()).toContain("sideband failed during startup");
         expect(sockets).toHaveLength(1);
+        expect(onError).toHaveBeenCalledOnce();
+        expect(onClose).toHaveBeenCalledExactlyOnceWith("error");
         if (terminalEvent === "error") {
           expect(logger.warn).toHaveBeenCalledWith(
             "OpenAI GPT-Live sideband socket failed: post-open failure",
@@ -810,38 +823,50 @@ describe("GPT-Live offer broker", () => {
     }
   });
 
-  it("expires an unused Gateway-control offer and releases its owner", async () => {
-    vi.useFakeTimers();
-    const { realtime } = createBroker();
-    const onClose = vi.fn();
-    try {
-      const reservation = await realtime.broker.createBrowserSession(
-        {
-          providerConfig: {},
-          model: "gpt-realtime-2.1",
-          gatewayControl: { bindBridge: vi.fn(), onClose },
-          gaSession: { type: "realtime", model: "gpt-realtime-2.1" },
-          gaSideband: {
-            createBridge: vi.fn(),
+  it.each([false, true])(
+    "expires an unused Gateway-control offer despite a throwing callback (%s)",
+    async (throwingCallback) => {
+      vi.useFakeTimers();
+      const { realtime } = createBroker();
+      const onClose = vi.fn(() => {
+        if (throwingCallback) {
+          throw new Error("close callback failed");
+        }
+      });
+      try {
+        const reservation = await realtime.broker.createBrowserSession(
+          {
+            providerConfig: {},
+            model: "gpt-realtime-2.1",
+            gatewayControl: { bindBridge: vi.fn(), onClose },
+            gaSession: { type: "realtime", model: "gpt-realtime-2.1" },
+            clientControl: { owner: "gateway" },
+            gaSideband: {
+              createBridge: vi.fn(),
+            },
           },
-        },
-        { type: "api-key", token: "platform-key" },
-      );
-      if (reservation.transport !== "webrtc") {
-        throw new Error("Expected WebRTC reservation");
-      }
+          { type: "api-key", token: "platform-key" },
+        );
+        if (reservation.transport !== "webrtc") {
+          throw new Error("Expected WebRTC reservation");
+        }
 
-      await vi.advanceTimersByTimeAsync(60_000);
-      expect(onClose).toHaveBeenCalledOnce();
-      expect(onClose).toHaveBeenCalledWith("completed");
-      const expired = createResponseHarness();
-      await realtime.handler(createRequest({ token: reservation.clientSecret }), expired.res);
-      expect(expired.res.statusCode).toBe(401);
-    } finally {
-      await realtime.cleanup();
-      vi.useRealTimers();
-    }
-  });
+        const expiryError = await vi.advanceTimersByTimeAsync(60_000).then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        expect.soft(expiryError).toBeUndefined();
+        expect(onClose).toHaveBeenCalledOnce();
+        expect(onClose).toHaveBeenCalledWith("completed");
+        const expired = createResponseHarness();
+        await realtime.handler(createRequest({ token: reservation.clientSecret }), expired.res);
+        expect(expired.res.statusCode).toBe(401);
+      } finally {
+        await realtime.cleanup();
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("caps pending and active sessions", async () => {
     const { realtime } = createBroker();
@@ -872,7 +897,9 @@ describe("GPT-Live offer broker", () => {
       providerConfig: {},
       model: "gpt-realtime-2.1",
       ownerConnId,
+      gatewayControl: { bindBridge: vi.fn() },
       gaSession: { type: "realtime" as const, model: "gpt-realtime-2.1" },
+      clientControl: { owner: "gateway" as const },
       gaSideband: {
         createBridge: vi.fn(),
       },

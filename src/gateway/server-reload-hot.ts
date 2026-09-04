@@ -191,10 +191,10 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
         return;
       }
       const commit = async () => {
-        if (plan.restartHeartbeat || plan.reconcileSkillReviewJobs) {
+        if (plan.reconcileSystemJobs) {
           // Runtime publication promises that durable monitor rows reflect this config.
           // A retrying or superseded pass leaves the previous generation authoritative.
-          const reconciliation = await nextState.cronState.reconcileHeartbeatJobs(nextConfig);
+          const reconciliation = await nextState.cronState.reconcileSystemJobs(nextConfig);
           assertReloadPublicationCurrent(publication?.isCurrent() ?? true, isRestartRetryStopped());
           if (reconciliation !== "converged") {
             throw new GatewayHotReloadRecoveryError("cron monitor");
@@ -596,17 +596,6 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
       return "applied-restart-required";
     }
 
-    if (plan.restartHealthMonitor) {
-      try {
-        state.channelHealthMonitor?.stop();
-        await state.channelHealthMonitor?.waitForIdle();
-        nextState.channelHealthMonitor = params.createHealthMonitor(nextConfig);
-        params.setState(nextState);
-      } catch (err) {
-        scheduleRecoveryRestart("health monitor reload", err);
-      }
-    }
-
     if (plan.disposeMcpRuntimes) {
       await disposeMcpRuntimesWithTimeout({
         dispose: disposeAllSessionMcpRuntimes,
@@ -699,6 +688,7 @@ export function createGatewayReloadHandlers(params: GatewayReloadHandlerParams) 
     publishAppliedConfigHash,
     publishDeferredAppliedConfigHash,
     hasOutstandingGatewayRestart,
+    hasConfigCandidatePending,
     beginGatewayRestartLifecycle,
     pauseGatewayRestartForConfigCandidate,
     publishAcceptedRestartTarget,

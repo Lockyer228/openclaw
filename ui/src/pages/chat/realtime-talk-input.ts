@@ -118,21 +118,29 @@ export function describeRealtimeTalkInputError(error: unknown): string {
 }
 
 async function discoverRealtimeTalkDevices(
-  requestPermission: boolean,
+  requestPermission: () => boolean,
   kind: RealtimeTalkDeviceKind,
 ): Promise<RealtimeTalkDeviceDiscovery> {
   const devices = globalThis.navigator?.mediaDevices;
   if (!devices?.enumerateDevices) {
     return { devices: [], permissionRequired: false, issue: "list-unsupported" };
   }
+  const permissionRequestedAtStart = requestPermission();
   let entries: MediaDeviceInfo[];
   try {
     entries = await devices.enumerateDevices();
   } catch (error) {
+    // Preserve a gesture's queued upgrade if passive enumeration failed. The
+    // permission-bearing pass cannot recursively upgrade itself again.
+    if (!permissionRequestedAtStart && requestPermission()) {
+      return discoverRealtimeTalkDevices(requestPermission, kind);
+    }
     return { devices: [], permissionRequired: false, issue: deviceIssueFromError(error) };
   }
   const permissionRequired = deviceDetailsHidden(entries, kind);
-  if (!requestPermission || !permissionRequired || !devices.getUserMedia) {
+  // Permission intent belongs to the caller's live surface, not the earlier
+  // enumeration. There is no asynchronous gap between this check and the probe.
+  if (!permissionRequired || !devices.getUserMedia || !requestPermission()) {
     return { devices: normalizeDevices(entries, kind), permissionRequired, issue: null };
   }
 
@@ -157,13 +165,13 @@ async function discoverRealtimeTalkDevices(
 }
 
 export async function discoverRealtimeTalkInputs(
-  requestPermission: boolean,
+  requestPermission: () => boolean,
 ): Promise<RealtimeTalkDeviceDiscovery> {
   return discoverRealtimeTalkDevices(requestPermission, "audioinput");
 }
 
 export async function discoverRealtimeTalkCameras(
-  requestPermission: boolean,
+  requestPermission: () => boolean,
 ): Promise<RealtimeTalkDeviceDiscovery> {
   return discoverRealtimeTalkDevices(requestPermission, "videoinput");
 }
@@ -219,7 +227,7 @@ async function awaitRealtimeTalkMediaRequest(
   }
 }
 
-export async function openRealtimeTalkInput(
+async function openRealtimeTalkInput(
   inputDeviceId: string | undefined,
   options: { signal?: AbortSignal } = {},
 ): Promise<MediaStream> {
@@ -259,6 +267,81 @@ export async function openRealtimeTalkInput(
     throw realtimeTalkAbortReason(options.signal);
   }
   return audio;
+}
+
+export class RealtimeTalkInputController {
+  private controller: AbortController | null = null;
+  private media: MediaStream | null = null;
+
+  constructor(
+    private onEnded: (detail: string) => void,
+    private readonly onConnecting?: (detail?: string) => void,
+  ) {}
+
+  get stream(): MediaStream | null {
+    return this.media;
+  }
+
+  requireStream(): MediaStream {
+    const media = this.media;
+    if (!media) {
+      throw new Error(t("chat.composer.microphoneStopped"));
+    }
+    return media;
+  }
+
+  adopt(onEnded: (detail: string) => void): MediaStream {
+    const media = this.requireStream();
+    // Keep the same stream and listener across the candidate-to-transport handoff.
+    this.onEnded = onEnded;
+    return media;
+  }
+
+  async open(inputDeviceId: string | undefined): Promise<MediaStream> {
+    this.stop();
+    const controller = new AbortController();
+    this.controller = controller;
+    try {
+      this.onConnecting?.(t("chat.composer.microphoneAccessPending"));
+      const media = await openRealtimeTalkInput(inputDeviceId, { signal: controller.signal });
+      if (controller.signal.aborted) {
+        media.getTracks().forEach((track) => track.stop());
+        throw realtimeTalkAbortReason(controller.signal);
+      }
+      this.media = media;
+      const onEnded = () => {
+        // A queued event from a retired microphone must not end its replacement.
+        if (this.controller !== controller) {
+          return;
+        }
+        this.stop();
+        this.onEnded(t("chat.composer.microphoneStopped"));
+      };
+      for (const track of media.getTracks()) {
+        track.addEventListener("ended", onEnded, { signal: controller.signal });
+      }
+      // Only the current, successful acquisition advances the visible startup phase.
+      // Cancellation must not overwrite idle or a replacement's microphone prompt.
+      this.onConnecting?.();
+      return media;
+    } catch (error) {
+      if (this.controller === controller) {
+        this.stop();
+      }
+      throw error;
+    }
+  }
+
+  stop(): void {
+    const controller = this.controller;
+    const media = this.media;
+    this.controller = null;
+    this.media = null;
+    // Abort removes only this acquisition's listeners before releasing tracks,
+    // keeping normal stop quiet without disturbing other consumers' listeners.
+    controller?.abort();
+    media?.getTracks().forEach((track) => track.stop());
+  }
 }
 
 export async function openRealtimeTalkCamera(
